@@ -1,0 +1,6 @@
+{
+  "name": "quality-pipeline",
+  "version": "1.0.0",
+  "description": "Reusable multi-round automated code quality pipeline. Runs sequential quality rounds (testing, refactoring, dead code elimination, simplification) with test verification and clean git commits.",
+  "commands": ["commands/quality-pipeline.md"]
+}
