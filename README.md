@@ -1,6 +1,6 @@
 # Quality Pipeline
 
-A reusable, multi-round automated code quality tool for Claude Code. Runs sequential quality rounds (testing, refactoring, dead code elimination, simplification) with test verification and clean git commits.
+A reusable, multi-round automated code quality tool for Claude Code. Runs sequential quality rounds (testing, refactoring, concurrency safety, dead code elimination, simplification) with test verification and clean git commits.
 
 ## Installation
 
@@ -26,7 +26,7 @@ The `/quality-pipeline` slash command is now available in any Claude Code sessio
 
 ```bash
 ~/.claude/plugins/quality-pipeline/scripts/quality-pipeline.sh \
-    --rounds "add-tests refactor dead-code simplify" \
+    --rounds "add-tests refactor concurrency dead-code simplify" \
     --test-command "npm test"
 ```
 
@@ -46,6 +46,7 @@ The `/quality-pipeline` slash command is now available in any Claude Code sessio
 |-------|--------|--------|-------------|
 | `add-tests` | `test:` | $5.00 | Add comprehensive tests for undertested code |
 | `refactor` | `refactor:` | $5.00 | Improve naming, structure, and clarity |
+| `concurrency` | `fix:` | $5.00 | Fix data races, missing synchronization, and concurrency bugs |
 | `dead-code` | `chore:` | $3.00 | Remove unused imports, functions, and variables |
 | `simplify` | `style:` | $3.00 | Reduce unnecessary abstractions and complexity |
 
@@ -65,7 +66,7 @@ Drop a `.claude/pipeline.yaml` in your project:
 
 ```yaml
 test_command: "pytest tests/"
-rounds: [add-tests, refactor, dead-code, simplify]
+rounds: [add-tests, refactor, concurrency, dead-code, simplify]
 branch_prefix: "quality/"
 max_budget_usd: 20.00
 overrides:
