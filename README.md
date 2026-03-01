@@ -34,6 +34,7 @@ The `/quality-pipeline` slash command is now available in any Claude Code sessio
 
 | Option | Description |
 |--------|-------------|
+| `--project-dir DIR` | Run in DIR instead of current directory |
 | `--rounds "r1 r2 ..."` | Which rounds to run (default: all) |
 | `--config FILE` | Path to pipeline.yaml config |
 | `--start-from N` | Resume from round N (1-indexed) |

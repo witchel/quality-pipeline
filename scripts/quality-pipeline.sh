@@ -16,6 +16,7 @@ START_FROM=1
 TEST_COMMAND=""
 REQUESTED_ROUNDS=()
 CONFIG_FILE=""
+PROJECT_DIR=""
 
 # Colors
 RED='\033[0;31m'
@@ -35,6 +36,7 @@ usage() {
 Usage: quality-pipeline.sh [OPTIONS]
 
 Options:
+  --project-dir DIR        Run in DIR instead of current directory
   --rounds "r1 r2 ..."    Rounds to run (default: all in rounds/ dir)
   --config FILE            Path to pipeline.yaml config
   --start-from N           Start from round N (1-indexed, for resuming)
@@ -44,6 +46,7 @@ Options:
 
 Examples:
   quality-pipeline.sh
+  quality-pipeline.sh --project-dir ~/myproject
   quality-pipeline.sh --rounds "add-tests refactor"
   quality-pipeline.sh --start-from 3
   quality-pipeline.sh --dry-run
@@ -255,6 +258,10 @@ main() {
                 shift
                 START_FROM="$1"
                 ;;
+            --project-dir)
+                shift
+                PROJECT_DIR="$1"
+                ;;
             --dry-run)
                 DRY_RUN=true
                 ;;
@@ -274,6 +281,16 @@ main() {
         esac
         shift
     done
+
+    # Change to project directory if specified
+    if [[ -n "$PROJECT_DIR" ]]; then
+        if [[ ! -d "$PROJECT_DIR" ]]; then
+            err "Project directory does not exist: $PROJECT_DIR"
+            exit 1
+        fi
+        cd "$PROJECT_DIR"
+        log "Working in: $PROJECT_DIR"
+    fi
 
     # Ensure we're in a git repo
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
