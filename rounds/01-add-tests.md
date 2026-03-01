@@ -3,7 +3,7 @@ name: add-tests
 order: 10
 commit_message_prefix: "test: "
 max_budget_usd: 5.00
-max_turns: 20
+max_turns: 30
 ---
 
 # Add Tests
