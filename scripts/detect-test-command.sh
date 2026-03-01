@@ -61,22 +61,37 @@ except: pass
 
     # 4. pyproject.toml or pytest
     if [[ -f "$dir/pyproject.toml" ]]; then
+        local pytest_found=false
         if grep -qE '\[tool\.pytest' "$dir/pyproject.toml" 2>/dev/null; then
-            echo "pytest"
-            return 0
+            pytest_found=true
+        elif grep -qE 'pytest' "$dir/pyproject.toml" 2>/dev/null; then
+            pytest_found=true
         fi
-        if grep -qE 'pytest' "$dir/pyproject.toml" 2>/dev/null; then
-            echo "pytest"
+        if $pytest_found; then
+            # Use uv run if this is a uv project
+            if [[ -f "$dir/uv.lock" ]]; then
+                echo "uv run pytest"
+            else
+                echo "pytest"
+            fi
             return 0
         fi
     fi
     if [[ -f "$dir/setup.cfg" ]] && grep -qE '\[tool:pytest\]' "$dir/setup.cfg" 2>/dev/null; then
-        echo "pytest"
+        if [[ -f "$dir/uv.lock" ]]; then
+            echo "uv run pytest"
+        else
+            echo "pytest"
+        fi
         return 0
     fi
     if [[ -d "$dir/tests" ]] || [[ -d "$dir/test" ]]; then
-        if command -v pytest &>/dev/null && [[ -f "$dir/requirements.txt" || -f "$dir/pyproject.toml" || -f "$dir/setup.py" ]]; then
-            echo "pytest"
+        if [[ -f "$dir/requirements.txt" || -f "$dir/pyproject.toml" || -f "$dir/setup.py" ]]; then
+            if [[ -f "$dir/uv.lock" ]]; then
+                echo "uv run pytest"
+            elif command -v pytest &>/dev/null; then
+                echo "pytest"
+            fi
             return 0
         fi
     fi

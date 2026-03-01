@@ -101,7 +101,7 @@ The pipeline auto-detects your test runner by checking (in order):
 1. CLAUDE.md for test command mentions
 2. Makefile `test` target
 3. package.json `test` script (respects bun/pnpm/yarn lockfiles)
-4. pyproject.toml / pytest configuration
+4. pyproject.toml / pytest configuration (uses `uv run pytest` if `uv.lock` present)
 5. go.mod → `go test ./...`
 6. Cargo.toml → `cargo test`
 

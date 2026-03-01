@@ -204,6 +204,11 @@ After making changes, run the tests to verify nothing is broken.
 Do not commit your changes — the pipeline handles commits.
 Focus exclusively on the task described in the prompt. Do not do work that belongs to other rounds."
 
+    # Snapshot untracked files before this round (for safe rollback)
+    local pre_round_untracked
+    pre_round_untracked=$(mktemp)
+    git ls-files --others --exclude-standard > "$pre_round_untracked"
+
     # Run claude -p
     log "Invoking claude..."
     local claude_exit=0
@@ -220,24 +225,34 @@ Focus exclusively on the task described in the prompt. Do not do work that belon
         return 1
     fi
 
-    # Check if any files changed
-    if git diff --quiet && git diff --cached --quiet; then
+    # Check if any files changed (tracked modifications or new untracked files)
+    if git diff --quiet && git diff --cached --quiet && [[ -z "$(git ls-files --others --exclude-standard)" ]]; then
         warn "No changes made in round $round_num ($name) — skipping commit"
         return 0
     fi
+
+    # Stage all changes (including new files) before testing
+    git add -A
 
     # Run tests before committing
     if ! run_tests "$test_cmd"; then
         err "Tests failed after round $round_num ($name)"
         err "Rolling back changes from this round..."
+        git reset HEAD -- . 2>/dev/null || true
         git checkout -- . 2>/dev/null || true
-        git clean -fd 2>/dev/null || true
+        # Only remove files that are untracked AND were not present before this round
+        if [[ -f "$pre_round_untracked" ]]; then
+            git ls-files --others --exclude-standard | while IFS= read -r f; do
+                if ! grep -qxF "$f" "$pre_round_untracked"; then
+                    rm -f "$f"
+                fi
+            done
+        fi
         return 1
     fi
 
-    # Commit
+    # Commit (already staged above)
     local commit_msg="${commit_prefix}${name} (round ${round_num}/${total_rounds})"
-    git add -A
     git commit -m "$commit_msg" --no-gpg-sign 2>/dev/null || git commit -m "$commit_msg"
     ok "Committed: $commit_msg"
 }
