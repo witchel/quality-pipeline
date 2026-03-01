@@ -171,8 +171,8 @@ run_round() {
     prompt=$(round_prompt "$round_file")
 
     # Apply config overrides
-    local safe_name="${name//-/_}"
-    safe_name="${safe_name^^}"
+    local safe_name
+    safe_name="$(echo "${name//-/_}" | tr '[:lower:]' '[:upper:]')"
     local override_budget_var="CONFIG_OVERRIDE_${safe_name}_BUDGET"
     local override_append_var="CONFIG_OVERRIDE_${safe_name}_APPEND"
     [[ -n "${!override_budget_var:-}" ]] && max_budget="${!override_budget_var}"
