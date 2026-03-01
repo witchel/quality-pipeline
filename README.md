@@ -1,6 +1,6 @@
 # Quality Pipeline
 
-A reusable, multi-round automated code quality tool for Claude Code. Runs sequential quality rounds (testing, refactoring, concurrency, error handling, security, type safety, dead code elimination, dependency hygiene, simplification) with test verification and clean git commits.
+A reusable, multi-round automated code quality tool for Claude Code. Runs sequential quality rounds (testing, refactoring, concurrency, fault tolerance, error handling, security, type safety, dead code elimination, dependency hygiene, simplification) with test verification and clean git commits.
 
 ## Installation
 
@@ -48,6 +48,7 @@ The `/quality-pipeline` slash command is now available in any Claude Code sessio
 | `add-tests` | `test:` | $5.00 | Add comprehensive tests for undertested code |
 | `refactor` | `refactor:` | $5.00 | Improve naming, structure, and clarity |
 | `concurrency` | `fix:` | $5.00 | Fix races, lost updates, and find parallelization opportunities |
+| `fault-tolerance` | `fix:` | $5.00 | Fix non-atomic writes, lost updates, missing fsync, and idempotency bugs |
 | `error-handling` | `fix:` | $5.00 | Fix swallowed errors, missing error paths, and inconsistent patterns |
 | `security` | `fix:` | $5.00 | Fix hardcoded secrets, injection vectors, and insecure defaults |
 | `type-safety` | `refactor:` | $5.00 | Add missing type annotations and tighten overly broad types |
@@ -71,7 +72,7 @@ Drop a `.claude/pipeline.yaml` in your project:
 
 ```yaml
 test_command: "pytest tests/"
-rounds: [add-tests, refactor, concurrency, error-handling, security, type-safety, dead-code, dependency-hygiene, simplify]
+rounds: [add-tests, refactor, concurrency, fault-tolerance, error-handling, security, type-safety, dead-code, dependency-hygiene, simplify]
 branch_prefix: "quality/"
 max_budget_usd: 20.00
 overrides:
