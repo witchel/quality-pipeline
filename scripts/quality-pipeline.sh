@@ -31,6 +31,178 @@ ok()    { echo -e "${GREEN}[pipeline]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[pipeline]${NC} $*"; }
 err()   { echo -e "${RED}[pipeline]${NC} $*" >&2; }
 
+# --- Resource monitoring ---
+
+GPU_TYPE="none"
+MONITOR_PID=""
+MONITOR_INTERVAL=60  # seconds between periodic reports
+PIPELINE_START_EPOCH=0
+
+detect_gpu() {
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        GPU_TYPE="nvidia"
+    elif command -v rocm-smi &>/dev/null; then
+        GPU_TYPE="rocm"
+    else
+        GPU_TYPE="none"
+    fi
+}
+
+format_duration() {
+    local secs="$1"
+    if [[ $secs -ge 3600 ]]; then
+        printf "%dh %dm %ds" $((secs / 3600)) $((secs % 3600 / 60)) $((secs % 60))
+    elif [[ $secs -ge 60 ]]; then
+        printf "%dm %ds" $((secs / 60)) $((secs % 60))
+    else
+        printf "%ds" "$secs"
+    fi
+}
+
+get_resource_snapshot() {
+    local cpu_info mem_info gpu_info=""
+
+    # CPU: load average (instant, cross-platform)
+    local ncpu loadavg
+    ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "?")
+    if [[ -f /proc/loadavg ]]; then
+        loadavg=$(awk '{print $1}' /proc/loadavg)
+    else
+        loadavg=$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $1}')
+    fi
+    cpu_info="load ${loadavg:-?} (${ncpu} cores)"
+
+    # Memory
+    case "$(uname)" in
+        Darwin)
+            local mem_total_mb page_size used_mb pct
+            local pages_active=0 pages_wired=0 pages_compressed=0
+            mem_total_mb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1048576 ))
+            page_size=$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)
+            eval "$(vm_stat 2>/dev/null | awk '
+                /Pages active/            {gsub(/\./,"",$NF); print "pages_active="$NF}
+                /Pages wired/             {gsub(/\./,"",$NF); print "pages_wired="$NF}
+                /occupied by compressor/  {gsub(/\./,"",$NF); print "pages_compressed="$NF}
+            ')"
+            used_mb=$(( (pages_active + pages_wired + pages_compressed) * page_size / 1048576 ))
+            if [[ $mem_total_mb -gt 0 ]]; then
+                pct=$(( used_mb * 100 / mem_total_mb ))
+                mem_info="${used_mb}/${mem_total_mb} MB (${pct}%)"
+            else
+                mem_info="?"
+            fi
+            ;;
+        Linux)
+            if command -v free &>/dev/null; then
+                mem_info=$(free -m 2>/dev/null \
+                    | awk '/Mem:/ {if ($2>0) printf "%d/%d MB (%.0f%%)", $3, $2, $3*100/$2; else print "?"}')
+            elif [[ -f /proc/meminfo ]]; then
+                # Fallback for minimal containers without procps
+                mem_info=$(awk '
+                    /MemTotal:/     {total=$2}
+                    /MemAvailable:/ {avail=$2}
+                    END {
+                        if (total>0) {
+                            used=total-avail;
+                            printf "%d/%d MB (%.0f%%)", used/1024, total/1024, used*100/total
+                        } else print "?"
+                    }
+                ' /proc/meminfo)
+            else
+                mem_info="?"
+            fi
+            ;;
+        *)
+            mem_info="?"
+            ;;
+    esac
+
+    # GPU — only report when utilization > 0
+    case "${GPU_TYPE:-none}" in
+        nvidia)
+            # Query all GPUs; summarize as "GPU0: X% VRAM Y/Z MB, GPU1: ..."
+            local gpu_lines
+            gpu_lines=$(nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total \
+                --format=csv,noheader,nounits 2>/dev/null) || true
+            if [[ -n "$gpu_lines" ]]; then
+                local parts=() any_active=false
+                while IFS= read -r line; do
+                    local idx util mem_used mem_total
+                    idx=$(echo "$line" | awk -F', ' '{print $1}' | tr -d ' ')
+                    util=$(echo "$line" | awk -F', ' '{print $2}' | tr -d ' ')
+                    mem_used=$(echo "$line" | awk -F', ' '{print $3}' | tr -d ' ')
+                    mem_total=$(echo "$line" | awk -F', ' '{print $4}' | tr -d ' ')
+                    if [[ -n "$util" && "$util" =~ ^[0-9]+$ && "$util" -gt 0 ]]; then
+                        any_active=true
+                    fi
+                    parts+=("GPU${idx}: ${util}% VRAM ${mem_used}/${mem_total} MB")
+                done <<< "$gpu_lines"
+                if $any_active; then
+                    gpu_info="${parts[0]}"
+                    for (( gi=1; gi<${#parts[@]}; gi++ )); do
+                        gpu_info="${gpu_info}, ${parts[$gi]}"
+                    done
+                fi
+            fi
+            ;;
+        rocm)
+            # Try modern rocm-smi first (ROCm 6+), fall back to legacy
+            local rocm_out
+            rocm_out=$(rocm-smi --showgpuuse 2>/dev/null || rocm-smi --showuse 2>/dev/null) || true
+            if [[ -n "$rocm_out" ]]; then
+                local gpu_util
+                gpu_util=$(echo "$rocm_out" \
+                    | awk '/GPU use|GPU Utilization/ {gsub(/%/,""); for(i=1;i<=NF;i++) if($i+0==$i && $i>0) {print $i; exit}}')
+                if [[ -n "$gpu_util" && "$gpu_util" =~ ^[0-9]+$ && "$gpu_util" -gt 0 ]]; then
+                    gpu_info="GPU: ${gpu_util}%"
+                fi
+            fi
+            ;;
+    esac
+
+    local report="CPU: ${cpu_info} | Mem: ${mem_info}"
+    [[ -n "$gpu_info" ]] && report="${report} | ${gpu_info}"
+    echo "$report"
+}
+
+start_resource_monitor() {
+    local round_start_epoch="$1"
+    local round_name="$2"
+    (
+        set +e  # don't exit on errors in monitor subshell
+        while true; do
+            sleep "$MONITOR_INTERVAL"
+            local now elapsed snapshot
+            now=$(date +%s)
+            elapsed=$(( now - round_start_epoch ))
+            snapshot=$(get_resource_snapshot 2>/dev/null) || snapshot="(unavailable)"
+            echo -e "${BLUE}[pipeline]${NC}   ⏱ $(format_duration $elapsed) | ${snapshot}"
+        done
+    ) &
+    MONITOR_PID=$!
+}
+
+stop_resource_monitor() {
+    if [[ -n "${MONITOR_PID:-}" ]]; then
+        kill "$MONITOR_PID" 2>/dev/null || true
+        wait "$MONITOR_PID" 2>/dev/null || true
+        MONITOR_PID=""
+    fi
+}
+
+log_round_finish() {
+    local start_epoch="$1" name="$2" status="$3"
+    local elapsed=$(( $(date +%s) - start_epoch ))
+    local snapshot
+    snapshot=$(get_resource_snapshot 2>/dev/null) || snapshot="(unavailable)"
+    log "Round ${BOLD}${name}${NC} ${status} in $(format_duration $elapsed) | ${snapshot}"
+}
+
+cleanup_monitor() {
+    stop_resource_monitor
+}
+trap cleanup_monitor EXIT
+
 usage() {
     cat <<'EOF'
 Usage: quality-pipeline.sh [OPTIONS]
@@ -162,6 +334,8 @@ run_tests() {
 
 run_round() {
     local round_file="$1" round_num="$2" total_rounds="$3" test_cmd="$4"
+    local round_start_epoch
+    round_start_epoch=$(date +%s)
 
     local name commit_prefix max_budget max_turns prompt
     name=$(frontmatter_field "$round_file" "name")
@@ -209,6 +383,10 @@ Focus exclusively on the task described in the prompt. Do not do work that belon
     pre_round_untracked=$(mktemp)
     git ls-files --others --exclude-standard > "$pre_round_untracked"
 
+    # Log initial resource state and start periodic monitor
+    log "Resources: $(get_resource_snapshot)"
+    start_resource_monitor "$round_start_epoch" "$name"
+
     # Run claude -p
     log "Invoking claude..."
     local claude_exit=0
@@ -220,14 +398,19 @@ Focus exclusively on the task described in the prompt. Do not do work that belon
         --output-format json \
         2>&1 | tee /tmp/quality-pipeline-round-${round_num}.log || claude_exit=$?
 
+    # Stop periodic resource monitor
+    stop_resource_monitor
+
     if [[ $claude_exit -ne 0 ]]; then
         err "Claude exited with code $claude_exit in round $round_num ($name)"
+        log_round_finish "$round_start_epoch" "$name" "failed"
         return 1
     fi
 
     # Check if any files changed (tracked modifications or new untracked files)
     if git diff --quiet && git diff --cached --quiet && [[ -z "$(git ls-files --others --exclude-standard)" ]]; then
         warn "No changes made in round $round_num ($name) — skipping commit"
+        log_round_finish "$round_start_epoch" "$name" "no changes"
         return 0
     fi
 
@@ -248,6 +431,7 @@ Focus exclusively on the task described in the prompt. Do not do work that belon
                 fi
             done
         fi
+        log_round_finish "$round_start_epoch" "$name" "tests failed"
         return 1
     fi
 
@@ -255,6 +439,7 @@ Focus exclusively on the task described in the prompt. Do not do work that belon
     local commit_msg="${commit_prefix}${name} (round ${round_num}/${total_rounds})"
     git commit -m "$commit_msg" --no-gpg-sign 2>/dev/null || git commit -m "$commit_msg"
     ok "Committed: $commit_msg"
+    log_round_finish "$round_start_epoch" "$name" "passed"
 }
 
 main() {
@@ -340,6 +525,12 @@ main() {
         log "Using test command: $TEST_COMMAND"
     fi
 
+    # Detect GPU availability
+    detect_gpu
+    if [[ "$GPU_TYPE" != "none" ]]; then
+        log "GPU monitoring: $GPU_TYPE"
+    fi
+
     # Resolve round files
     local -a round_files=()
     if [[ ${#REQUESTED_ROUNDS[@]} -gt 0 ]]; then
@@ -405,6 +596,7 @@ main() {
     fi
 
     # Run rounds
+    PIPELINE_START_EPOCH=$(date +%s)
     local passed=0 failed=0 skipped=0
     for i in "${!round_files[@]}"; do
         local n=$((i + 1))
@@ -426,10 +618,13 @@ main() {
     done
 
     # Summary
+    local pipeline_elapsed=$(( $(date +%s) - PIPELINE_START_EPOCH ))
     echo ""
     log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log "${BOLD}Pipeline Summary${NC}"
     log "Branch: $branch_name"
+    log "Total time: $(format_duration $pipeline_elapsed)"
+    log "Resources: $(get_resource_snapshot)"
     ok "Passed: $passed"
     [[ $skipped -gt 0 ]] && warn "Skipped: $skipped"
     [[ $failed -gt 0 ]] && err "Failed: $failed"
