@@ -409,14 +409,14 @@ main() {
     for i in "${!round_files[@]}"; do
         local n=$((i + 1))
         if [[ $n -lt $START_FROM ]]; then
-            ((skipped++))
+            skipped=$((skipped + 1))
             continue
         fi
 
         if run_round "${round_files[$i]}" "$n" "$total" "$TEST_COMMAND"; then
-            ((passed++))
+            passed=$((passed + 1))
         else
-            ((failed++))
+            failed=$((failed + 1))
             err "Pipeline stopped at round $n."
             if [[ $n -lt $total ]]; then
                 warn "Resume with: quality-pipeline.sh --start-from $((n + 1))"
