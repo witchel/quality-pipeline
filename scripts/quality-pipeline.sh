@@ -19,13 +19,17 @@ CONFIG_FILE=""
 PROJECT_DIR=""
 REVIEW_FLAG=""  # "" = use per-round default, "true" = force on, "false" = force off
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-NC='\033[0m'
+# Colors — suppress ANSI when stdout is not a TTY (piped, CI, Claude Code)
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' NC=''
+fi
 
 log()   { echo -e "${BLUE}[pipeline]${NC} $*"; }
 ok()    { echo -e "${GREEN}[pipeline]${NC} $*"; }
@@ -199,10 +203,32 @@ log_round_finish() {
     log "Round ${BOLD}${name}${NC} ${status} in $(format_duration $elapsed) | ${snapshot}"
 }
 
-cleanup_monitor() {
-    stop_resource_monitor
+# --- Temp file management ---
+
+TEMP_FILES=()
+CURRENT_ROUND_NAME=""
+
+make_temp() {
+    local f
+    f=$(mktemp)
+    TEMP_FILES+=("$f")
+    echo "$f"
 }
-trap cleanup_monitor EXIT
+
+# --- Cleanup and signal handling ---
+
+cleanup_all() {
+    stop_resource_monitor
+    [[ ${#TEMP_FILES[@]} -gt 0 ]] && rm -f "${TEMP_FILES[@]}" 2>/dev/null
+    if [[ -n "${CURRENT_ROUND_NAME:-}" ]]; then
+        echo ""
+        err "Interrupted during round: $CURRENT_ROUND_NAME"
+        warn "Partial changes may remain. Clean up with:"
+        warn "  git checkout -- . && git clean -fd"
+    fi
+}
+trap cleanup_all EXIT
+trap 'exit 130' INT TERM
 
 usage() {
     cat <<'EOF'
@@ -234,7 +260,8 @@ EOF
 # Extract a YAML field from a round file's frontmatter
 frontmatter_field() {
     local file="$1" field="$2"
-    sed -n '/^---$/,/^---$/p' "$file" | grep -E "^${field}:" | head -1 | sed "s/^${field}:\s*//" | tr -d '"' | tr -d "'"
+    # || true: grep returns 1 when field is absent; pipefail would kill the script
+    sed -n '/^---$/,/^---$/p' "$file" | grep -E "^${field}:" | head -1 | sed "s/^${field}:[[:space:]]*//" | tr -d '"' | tr -d "'" || true
 }
 
 # Extract the prompt body (everything after the closing --- of frontmatter)
@@ -259,9 +286,10 @@ discover_rounds() {
         [[ -f "$f" ]] || continue
         found+=("$f")
     done
-    # Sort by filename
-    IFS=$'\n' sorted=($(sort <<<"${found[*]}")); unset IFS
-    echo "${sorted[@]}"
+    if [[ ${#found[@]} -eq 0 ]]; then
+        return
+    fi
+    printf '%s\0' "${found[@]}" | sort -z | tr '\0' '\n'
 }
 
 # Resolve a round name (e.g. "audit-tests") to its file path
@@ -301,12 +329,12 @@ try:
     if c.get('branch_prefix'):
         print(f'CONFIG_BRANCH_PREFIX={shlex.quote(c[\"branch_prefix\"])}')
     if c.get('max_budget_usd'):
-        print(f'CONFIG_MAX_BUDGET={c[\"max_budget_usd\"]}')
+        print(f'CONFIG_MAX_BUDGET={shlex.quote(str(c[\"max_budget_usd\"]))}')
     overrides = c.get('overrides', {})
     for name, ov in overrides.items():
         safe = name.replace('-', '_').upper()
         if ov.get('max_budget_usd'):
-            print(f'CONFIG_OVERRIDE_{safe}_BUDGET={ov[\"max_budget_usd\"]}')
+            print(f'CONFIG_OVERRIDE_{safe}_BUDGET={shlex.quote(str(ov[\"max_budget_usd\"]))}')
         if ov.get('append_prompt'):
             print(f'CONFIG_OVERRIDE_{safe}_APPEND={shlex.quote(ov[\"append_prompt\"])}')
         if ov.get('gate'):
@@ -381,51 +409,54 @@ run_reviewer() {
 
     # Build review prompt by replacing DIFF_PLACEHOLDER with actual diff
     # Use python for reliable text substitution (diffs contain sed/awk-hostile chars)
+    # Paths passed via sys.argv to avoid shell injection
     local review_prompt
     review_prompt=$(python3 -c "
 import sys
-template = open('$template_file').read()
+template = open(sys.argv[1]).read()
 diff = sys.stdin.read()
 print(template.replace('DIFF_PLACEHOLDER', diff))
-" <<< "$diff_content" 2>/dev/null) || {
+" "$template_file" <<< "$diff_content" 2>/dev/null) || {
         warn "Failed to build reviewer prompt — skipping"
         return 0
     }
 
     local review_output_file="/tmp/quality-pipeline-review-round-${round_num}.json"
 
-    # Invoke claude for review with small budget
+    # Invoke claude for review with small budget (output to log only, not terminal)
+    local review_exit=0
     claude -p "$review_prompt" \
         --dangerously-skip-permissions \
         --max-budget-usd 1.00 \
         --max-turns 5 \
         --output-format json \
-        2>&1 | tee "$review_output_file" || true
+        > "$review_output_file" 2>&1 || review_exit=$?
+    log "Reviewer claude finished (exit $review_exit)"
 
-    # Parse verdict from output
+    # Parse verdict from output using proper JSON parsing (not regex)
     local verdict
     verdict=$(python3 -c "
 import json, sys
 try:
-    text = open('$review_output_file').read()
-    # Try to find JSON in the output (may be wrapped in other text)
-    import re
-    # Look for the result field in JSON output format
+    raw = open(sys.argv[1]).read()
+    # claude --output-format json wraps in {\"result\": \"...\"}
     try:
-        outer = json.loads(text)
+        outer = json.loads(raw)
         if isinstance(outer, dict) and 'result' in outer:
-            text = outer['result']
-    except json.JSONDecodeError:
+            raw = outer['result']
+    except (json.JSONDecodeError, ValueError):
         pass
-    m = re.search(r'\{[^{}]*\"verdict\"[^{}]*\}', text, re.DOTALL)
-    if m:
-        d = json.loads(m.group())
-        print(d.get('verdict', 'unknown'))
-    else:
-        print('unknown')
+    # The reviewer should return pure JSON, but might have markdown fences
+    text = raw.strip()
+    if text.startswith('\`\`\`'):
+        lines = text.split('\n')
+        lines = [l for l in lines if not l.startswith('\`\`\`')]
+        text = '\n'.join(lines)
+    d = json.loads(text)
+    print(d.get('verdict', 'unknown'))
 except Exception:
     print('unknown')
-" 2>/dev/null) || verdict="unknown"
+" "$review_output_file" 2>/dev/null) || verdict="unknown"
 
     case "$verdict" in
         pass)     ok "Reviewer: ${GREEN}PASS${NC}" ;;
@@ -456,6 +487,7 @@ run_round() {
 
     local name commit_prefix max_budget max_turns prompt gate max_retries
     name=$(frontmatter_field "$round_file" "name")
+    CURRENT_ROUND_NAME="$name"
     commit_prefix=$(frontmatter_field "$round_file" "commit_message_prefix")
     max_budget=$(frontmatter_field "$round_file" "max_budget_usd")
     max_turns=$(frontmatter_field "$round_file" "max_turns")
@@ -499,10 +531,26 @@ run_round() {
     log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     if $DRY_RUN; then
+        local review_status
+        local safe_name_dr
+        safe_name_dr="$(echo "${name//-/_}" | tr '[:lower:]' '[:upper:]')"
+        local override_review_dr="CONFIG_OVERRIDE_${safe_name_dr}_REVIEW"
+        local override_analyzers_dr="CONFIG_OVERRIDE_${safe_name_dr}_ANALYZERS"
+        if [[ -n "$REVIEW_FLAG" ]]; then
+            review_status="$REVIEW_FLAG (CLI)"
+        elif [[ -n "${!override_review_dr:-}" ]]; then
+            review_status="${!override_review_dr} (config)"
+        else
+            review_status="$(frontmatter_field "$round_file" "review")"
+            review_status="${review_status:-false} (frontmatter)"
+        fi
+        local analyzers_status="${!override_analyzers_dr:-$(frontmatter_field "$round_file" "analyzers")}"
+        analyzers_status="${analyzers_status:-none}"
         log "[DRY RUN] Would run claude -p with ${#prompt} chars of prompt"
         log "[DRY RUN] Would run tests: $test_cmd"
         log "[DRY RUN] Would commit with prefix: ${commit_prefix}"
         log "[DRY RUN] Gate: $gate | Max retries: $max_retries"
+        log "[DRY RUN] Review: $review_status | Analyzers: $analyzers_status"
         return 0
     fi
 
@@ -527,14 +575,14 @@ If the prompt includes a Behavior Contract section, you MUST follow it strictly.
 
     # Snapshot untracked files before this round (for safe rollback)
     local pre_round_untracked
-    pre_round_untracked=$(mktemp)
+    pre_round_untracked=$(make_temp)
     git ls-files --others --exclude-standard > "$pre_round_untracked"
 
     # Log initial resource state and start periodic monitor
     log "Resources: $(get_resource_snapshot)"
     start_resource_monitor "$round_start_epoch" "$name"
 
-    # Run claude -p
+    # Run claude -p (output to log only, not terminal)
     log "Invoking claude..."
     local claude_exit=0
     claude -p "$prompt" \
@@ -543,7 +591,8 @@ If the prompt includes a Behavior Contract section, you MUST follow it strictly.
         --max-budget-usd "$max_budget" \
         --max-turns "$max_turns" \
         --output-format json \
-        2>&1 | tee /tmp/quality-pipeline-round-${round_num}.log || claude_exit=$?
+        > "/tmp/quality-pipeline-round-${round_num}.log" 2>&1 || claude_exit=$?
+    log "Claude finished (exit $claude_exit)"
 
     # Stop periodic resource monitor
     stop_resource_monitor
@@ -578,7 +627,7 @@ If the prompt includes a Behavior Contract section, you MUST follow it strictly.
 
     # --- Test + retry loop ---
     local test_output_file
-    test_output_file=$(mktemp)
+    test_output_file=$(make_temp)
     local attempt=0
     local tests_passed=false
 
@@ -618,19 +667,19 @@ Fix the test failures. Do not revert your previous work — fix the issues causi
         local retry_budget
         retry_budget=$(python3 -c "print(max(1.00, float('$max_budget') / 2))" 2>/dev/null || echo "1.00")
 
+        local retry_exit=0
         claude -p "$retry_prompt" \
             --append-system-prompt "$system_context" \
             --dangerously-skip-permissions \
             --max-budget-usd "$retry_budget" \
             --max-turns "$max_turns" \
             --output-format json \
-            2>&1 | tee "/tmp/quality-pipeline-round-${round_num}-retry-${attempt}.log" || true
+            > "/tmp/quality-pipeline-round-${round_num}-retry-${attempt}.log" 2>&1 || retry_exit=$?
+        log "Retry claude finished (exit $retry_exit)"
 
         # Re-stage any new changes
         git add -A
     done
-
-    rm -f "$test_output_file"
 
     if ! $tests_passed; then
         err "Tests failed after round $round_num ($name) (exhausted $max_retries retries)"
@@ -765,7 +814,9 @@ main() {
             fi
         done
     else
-        read -ra round_files <<< "$(discover_rounds)"
+        while IFS= read -r _rf; do
+            round_files+=("$_rf")
+        done < <(discover_rounds)
     fi
 
     local total=${#round_files[@]}
@@ -806,10 +857,16 @@ main() {
         local retries
         retries=$(frontmatter_field "${round_files[$i]}" "max_retries")
         retries="${retries:-0}"
+        local review
+        review=$(frontmatter_field "${round_files[$i]}" "review")
+        review="${review:-false}"
+        local analyzers
+        analyzers=$(frontmatter_field "${round_files[$i]}" "analyzers")
+        analyzers="${analyzers:-none}"
         local marker=""
         [[ $n -lt $START_FROM ]] && marker=" (skip)"
         [[ $n -eq $START_FROM ]] && marker=" ← start"
-        log "  $n. $name [\$${budget:-5.00}] gate=$gate retries=$retries$marker"
+        log "  $n. $name [\$${budget:-5.00}] gate=$gate retries=$retries review=$review analyzers=$analyzers$marker"
     done
     echo ""
 
@@ -821,20 +878,36 @@ main() {
     # Run rounds
     PIPELINE_START_EPOCH=$(date +%s)
     local passed=0 hard_failed=0 soft_failed=0 skipped=0
+    local -a ROUND_NAMES=() ROUND_RESULTS=()
     for i in "${!round_files[@]}"; do
         local n=$((i + 1))
+        local rname
+        rname=$(frontmatter_field "${round_files[$i]}" "name")
+
         if [[ $n -lt $START_FROM ]]; then
             skipped=$((skipped + 1))
+            ROUND_NAMES+=("$rname")
+            ROUND_RESULTS+=("skipped")
             continue
         fi
 
         local rc=0
         run_round "${round_files[$i]}" "$n" "$total" "$TEST_COMMAND" || rc=$?
+        CURRENT_ROUND_NAME=""
 
+        ROUND_NAMES+=("$rname")
         case $rc in
-            0)  passed=$((passed + 1)) ;;
+            0)  passed=$((passed + 1))
+                # Distinguish pass from no-changes by checking if a commit was made
+                if git log -1 --format=%s 2>/dev/null | grep -q "$rname" 2>/dev/null; then
+                    ROUND_RESULTS+=("passed")
+                else
+                    ROUND_RESULTS+=("no-changes")
+                fi
+                ;;
             1)  # Hard failure — stop pipeline
                 hard_failed=$((hard_failed + 1))
+                ROUND_RESULTS+=("HARD-FAILED")
                 err "Pipeline stopped at round $n (hard gate failure)."
                 if [[ $n -lt $total ]]; then
                     warn "Resume with: quality-pipeline.sh --start-from $((n + 1))"
@@ -843,6 +916,7 @@ main() {
                 ;;
             2)  # Soft failure — continue to next round
                 soft_failed=$((soft_failed + 1))
+                ROUND_RESULTS+=("soft-failed")
                 warn "Round $n failed (soft gate) — continuing to next round."
                 ;;
         esac
@@ -856,10 +930,31 @@ main() {
     log "Branch: $branch_name"
     log "Total time: $(format_duration $pipeline_elapsed)"
     log "Resources: $(get_resource_snapshot)"
+    echo ""
+    log "${BOLD}Per-round results:${NC}"
+    for ri in "${!ROUND_NAMES[@]}"; do
+        local result="${ROUND_RESULTS[$ri]}"
+        local result_display
+        case "$result" in
+            passed)      result_display="${GREEN}passed${NC}" ;;
+            no-changes)  result_display="${BLUE}no-changes${NC}" ;;
+            soft-failed) result_display="${YELLOW}soft-failed${NC}" ;;
+            HARD-FAILED) result_display="${RED}HARD-FAILED${NC}" ;;
+            skipped)     result_display="skipped" ;;
+            *)           result_display="$result" ;;
+        esac
+        log "  $((ri + 1)). ${ROUND_NAMES[$ri]}: $result_display"
+    done
+    echo ""
     ok "Passed: $passed"
     [[ $skipped -gt 0 ]] && warn "Skipped: $skipped"
     [[ $soft_failed -gt 0 ]] && warn "Soft failures: $soft_failed (continued past)"
     [[ $hard_failed -gt 0 ]] && err "Hard failures: $hard_failed (stopped pipeline)"
+    echo ""
+    log "${BOLD}Log files:${NC}"
+    for lf in /tmp/quality-pipeline-round-*.log /tmp/quality-pipeline-review-round-*.json; do
+        [[ -f "$lf" ]] && log "  $lf"
+    done
     log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     if [[ $hard_failed -gt 0 ]]; then
