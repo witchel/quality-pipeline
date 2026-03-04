@@ -4,6 +4,8 @@ order: 55
 commit_message_prefix: "refactor: "
 max_budget_usd: 5.00
 max_turns: 20
+gate: soft
+max_retries: 1
 ---
 
 # Improve Type Safety

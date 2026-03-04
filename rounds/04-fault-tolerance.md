@@ -4,6 +4,9 @@ order: 27
 commit_message_prefix: "fix: "
 max_budget_usd: 5.00
 max_turns: 20
+gate: hard
+max_retries: 0
+review: true
 ---
 
 # Fault Tolerance
@@ -98,6 +101,20 @@ Generate targeted tests for the fault tolerance patterns being fixed. **Do not m
 ### F. Verify
 
 After each fix, run the full test suite to confirm existing behavior is preserved. Do not proceed to the next area if tests are failing.
+
+## Behavior Contract
+
+### MUST change
+- Non-atomic file overwrites (direct writes without write-temp-fsync-rename)
+- Read-modify-write cycles on state files without locking
+- Missing fsync between write and rename in atomic write patterns
+- Non-idempotent operations that corrupt state when retried
+
+### MUST NOT change
+- Storage formats or serialization schemes
+- File layout or directory structure
+- Database schemas or migration files
+- Existing test files
 
 ## What NOT to do
 

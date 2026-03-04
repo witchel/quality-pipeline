@@ -15,6 +15,8 @@ Run the automated multi-round code quality pipeline.
 - `--start-from N` — Resume pipeline from round N (1-indexed)
 - `--dry-run` — Show what would happen without running anything
 - `--test-command "cmd"` — Override auto-detected test command
+- `--review` — Enable reviewer pass for all rounds
+- `--no-review` — Disable reviewer pass for all rounds
 
 ## What This Does
 

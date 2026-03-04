@@ -17,6 +17,7 @@ TEST_COMMAND=""
 REQUESTED_ROUNDS=()
 CONFIG_FILE=""
 PROJECT_DIR=""
+REVIEW_FLAG=""  # "" = use per-round default, "true" = force on, "false" = force off
 
 # Colors
 RED='\033[0;31m'
@@ -214,12 +215,14 @@ Options:
   --start-from N           Start from round N (1-indexed, for resuming)
   --dry-run                Show plan without executing
   --test-command "CMD"     Override auto-detected test command
+  --review                 Enable reviewer pass for all rounds
+  --no-review              Disable reviewer pass for all rounds
   -h, --help               Show this help
 
 Examples:
   quality-pipeline.sh
   quality-pipeline.sh --project-dir ~/myproject
-  quality-pipeline.sh --rounds "add-tests refactor"
+  quality-pipeline.sh --rounds "audit-tests refactor"
   quality-pipeline.sh --start-from 3
   quality-pipeline.sh --dry-run
   quality-pipeline.sh --test-command "pytest tests/"
@@ -261,7 +264,7 @@ discover_rounds() {
     echo "${sorted[@]}"
 }
 
-# Resolve a round name (e.g. "add-tests") to its file path
+# Resolve a round name (e.g. "audit-tests") to its file path
 resolve_round_file() {
     local name="$1"
     for f in "$ROUNDS_DIR"/*.md; do
@@ -306,6 +309,14 @@ try:
             print(f'CONFIG_OVERRIDE_{safe}_BUDGET={ov[\"max_budget_usd\"]}')
         if ov.get('append_prompt'):
             print(f'CONFIG_OVERRIDE_{safe}_APPEND={shlex.quote(ov[\"append_prompt\"])}')
+        if ov.get('gate'):
+            print(f'CONFIG_OVERRIDE_{safe}_GATE={shlex.quote(ov[\"gate\"])}')
+        if 'max_retries' in ov:
+            print(f'CONFIG_OVERRIDE_{safe}_RETRIES={int(ov[\"max_retries\"])}')
+        if 'review' in ov:
+            print(f'CONFIG_OVERRIDE_{safe}_REVIEW={shlex.quote(str(ov[\"review\"]).lower())}')
+        if ov.get('analyzers'):
+            print(f'CONFIG_OVERRIDE_{safe}_ANALYZERS={shlex.quote(ov[\"analyzers\"])}')
 except Exception as e:
     print(f'echo \"Warning: failed to parse config: {e}\"', file=sys.stderr)
 " 2>/dev/null)" 2>/dev/null || true
@@ -332,16 +343,124 @@ run_tests() {
     fi
 }
 
+run_reviewer() {
+    local round_num="$1" round_file="$2" name="$3"
+
+    # Determine if review is enabled: CLI flag > config override > frontmatter
+    local review_enabled
+    local safe_name
+    safe_name="$(echo "${name//-/_}" | tr '[:lower:]' '[:upper:]')"
+    local override_review_var="CONFIG_OVERRIDE_${safe_name}_REVIEW"
+
+    if [[ -n "$REVIEW_FLAG" ]]; then
+        review_enabled="$REVIEW_FLAG"
+    elif [[ -n "${!override_review_var:-}" ]]; then
+        review_enabled="${!override_review_var}"
+    else
+        review_enabled=$(frontmatter_field "$round_file" "review")
+    fi
+
+    [[ "$review_enabled" == "true" ]] || return 0
+
+    log "Running reviewer pass..."
+
+    # Get diff (truncate at 8000 chars)
+    local diff_content
+    diff_content=$(git diff HEAD~1 2>/dev/null | head -c 8000)
+    if [[ -z "$diff_content" ]]; then
+        warn "No diff to review — skipping reviewer"
+        return 0
+    fi
+
+    # Load template and replace placeholder
+    local template_file="$PLUGIN_DIR/templates/reviewer.md"
+    if [[ ! -f "$template_file" ]]; then
+        warn "Reviewer template not found: $template_file — skipping"
+        return 0
+    fi
+
+    # Build review prompt by replacing DIFF_PLACEHOLDER with actual diff
+    # Use python for reliable text substitution (diffs contain sed/awk-hostile chars)
+    local review_prompt
+    review_prompt=$(python3 -c "
+import sys
+template = open('$template_file').read()
+diff = sys.stdin.read()
+print(template.replace('DIFF_PLACEHOLDER', diff))
+" <<< "$diff_content" 2>/dev/null) || {
+        warn "Failed to build reviewer prompt — skipping"
+        return 0
+    }
+
+    local review_output_file="/tmp/quality-pipeline-review-round-${round_num}.json"
+
+    # Invoke claude for review with small budget
+    claude -p "$review_prompt" \
+        --dangerously-skip-permissions \
+        --max-budget-usd 1.00 \
+        --max-turns 5 \
+        --output-format json \
+        2>&1 | tee "$review_output_file" || true
+
+    # Parse verdict from output
+    local verdict
+    verdict=$(python3 -c "
+import json, sys
+try:
+    text = open('$review_output_file').read()
+    # Try to find JSON in the output (may be wrapped in other text)
+    import re
+    # Look for the result field in JSON output format
+    try:
+        outer = json.loads(text)
+        if isinstance(outer, dict) and 'result' in outer:
+            text = outer['result']
+    except json.JSONDecodeError:
+        pass
+    m = re.search(r'\{[^{}]*\"verdict\"[^{}]*\}', text, re.DOTALL)
+    if m:
+        d = json.loads(m.group())
+        print(d.get('verdict', 'unknown'))
+    else:
+        print('unknown')
+except Exception:
+    print('unknown')
+" 2>/dev/null) || verdict="unknown"
+
+    case "$verdict" in
+        pass)     ok "Reviewer: ${GREEN}PASS${NC}" ;;
+        warn)     warn "Reviewer: ${YELLOW}WARN${NC} — see $review_output_file" ;;
+        critical) err "Reviewer: ${RED}CRITICAL${NC} — see $review_output_file" ;;
+        *)        warn "Reviewer: could not parse verdict — see $review_output_file" ;;
+    esac
+}
+
+rollback_round() {
+    local pre_round_untracked="$1"
+    git reset HEAD -- . 2>/dev/null || true
+    git checkout -- . 2>/dev/null || true
+    # Only remove files that are untracked AND were not present before this round
+    if [[ -f "$pre_round_untracked" ]]; then
+        git ls-files --others --exclude-standard | while IFS= read -r f; do
+            if ! grep -qxF "$f" "$pre_round_untracked"; then
+                rm -f "$f"
+            fi
+        done
+    fi
+}
+
 run_round() {
     local round_file="$1" round_num="$2" total_rounds="$3" test_cmd="$4"
     local round_start_epoch
     round_start_epoch=$(date +%s)
 
-    local name commit_prefix max_budget max_turns prompt
+    local name commit_prefix max_budget max_turns prompt gate max_retries
     name=$(frontmatter_field "$round_file" "name")
     commit_prefix=$(frontmatter_field "$round_file" "commit_message_prefix")
     max_budget=$(frontmatter_field "$round_file" "max_budget_usd")
     max_turns=$(frontmatter_field "$round_file" "max_turns")
+    gate=$(frontmatter_field "$round_file" "gate")
+    max_retries=$(frontmatter_field "$round_file" "max_retries")
     prompt=$(round_prompt "$round_file")
 
     # Apply config overrides
@@ -349,24 +468,41 @@ run_round() {
     safe_name="$(echo "${name//-/_}" | tr '[:lower:]' '[:upper:]')"
     local override_budget_var="CONFIG_OVERRIDE_${safe_name}_BUDGET"
     local override_append_var="CONFIG_OVERRIDE_${safe_name}_APPEND"
+    local override_gate_var="CONFIG_OVERRIDE_${safe_name}_GATE"
+    local override_retries_var="CONFIG_OVERRIDE_${safe_name}_RETRIES"
+    local override_analyzers_var="CONFIG_OVERRIDE_${safe_name}_ANALYZERS"
     [[ -n "${!override_budget_var:-}" ]] && max_budget="${!override_budget_var}"
     [[ -n "${!override_append_var:-}" ]] && prompt="$prompt"$'\n\n'"${!override_append_var}"
+    [[ -n "${!override_gate_var:-}" ]] && gate="${!override_gate_var}"
+    [[ -n "${!override_retries_var:-}" ]] && max_retries="${!override_retries_var}"
 
     # Defaults
     max_budget="${max_budget:-5.00}"
     max_turns="${max_turns:-20}"
     commit_prefix="${commit_prefix:-chore: }"
+    gate="${gate:-hard}"
+    max_retries="${max_retries:-0}"
+
+    # Gate label for display
+    local gate_label
+    case "$gate" in
+        hard) gate_label="${RED}HARD${NC}" ;;
+        soft) gate_label="${YELLOW}SOFT${NC}" ;;
+        none) gate_label="${BLUE}NONE${NC}" ;;
+        *)    gate_label="$gate" ;;
+    esac
 
     echo ""
     log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log "${BOLD}Round $round_num/$total_rounds: $name${NC}"
-    log "Budget: \$$max_budget | Max turns: $max_turns"
+    log "Budget: \$$max_budget | Max turns: $max_turns | Gate: $gate_label | Retries: $max_retries"
     log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     if $DRY_RUN; then
         log "[DRY RUN] Would run claude -p with ${#prompt} chars of prompt"
         log "[DRY RUN] Would run tests: $test_cmd"
         log "[DRY RUN] Would commit with prefix: ${commit_prefix}"
+        log "[DRY RUN] Gate: $gate | Max retries: $max_retries"
         return 0
     fi
 
@@ -376,7 +512,18 @@ This is round $round_num of $total_rounds.
 The test command for this project is: $test_cmd
 After making changes, run the tests to verify nothing is broken.
 Do not commit your changes — the pipeline handles commits.
-Focus exclusively on the task described in the prompt. Do not do work that belongs to other rounds."
+Focus exclusively on the task described in the prompt. Do not do work that belongs to other rounds.
+If the prompt includes a Behavior Contract section, you MUST follow it strictly. Items under MUST change are required fixes. Items under MUST NOT change are hard constraints."
+
+    # Run static analysis and inject results into prompt
+    local analyzers_override="${!override_analyzers_var:-}"
+    local analyzers_from_frontmatter
+    analyzers_from_frontmatter=$(frontmatter_field "$round_file" "analyzers")
+    local analysis_output
+    analysis_output=$("$SCRIPT_DIR/run-static-analysis.sh" "$name" "$(pwd)" "${analyzers_override:-$analyzers_from_frontmatter}" 2>/dev/null) || true
+    if [[ -n "$analysis_output" ]]; then
+        prompt="$prompt"$'\n\n'"## Static Analysis Results"$'\n'"The following issues were found by static analysis tools. Use these as a starting point:"$'\n'"$analysis_output"
+    fi
 
     # Snapshot untracked files before this round (for safe rollback)
     local pre_round_untracked
@@ -404,6 +551,8 @@ Focus exclusively on the task described in the prompt. Do not do work that belon
     if [[ $claude_exit -ne 0 ]]; then
         err "Claude exited with code $claude_exit in round $round_num ($name)"
         log_round_finish "$round_start_epoch" "$name" "failed"
+        # Gate: hard → return 1 (stop), soft → return 2 (continue)
+        [[ "$gate" == "soft" ]] && return 2
         return 1
     fi
 
@@ -417,21 +566,79 @@ Focus exclusively on the task described in the prompt. Do not do work that belon
     # Stage all changes (including new files) before testing
     git add -A
 
-    # Run tests before committing
-    if ! run_tests "$test_cmd"; then
-        err "Tests failed after round $round_num ($name)"
-        err "Rolling back changes from this round..."
-        git reset HEAD -- . 2>/dev/null || true
-        git checkout -- . 2>/dev/null || true
-        # Only remove files that are untracked AND were not present before this round
-        if [[ -f "$pre_round_untracked" ]]; then
-            git ls-files --others --exclude-standard | while IFS= read -r f; do
-                if ! grep -qxF "$f" "$pre_round_untracked"; then
-                    rm -f "$f"
-                fi
-            done
+    # Skip test verification for gate=none
+    if [[ "$gate" == "none" ]]; then
+        local commit_msg="${commit_prefix}${name} (round ${round_num}/${total_rounds})"
+        git commit -m "$commit_msg" --no-gpg-sign 2>/dev/null || git commit -m "$commit_msg"
+        ok "Committed: $commit_msg (gate=none, tests skipped)"
+        run_reviewer "$round_num" "$round_file" "$name"
+        log_round_finish "$round_start_epoch" "$name" "passed"
+        return 0
+    fi
+
+    # --- Test + retry loop ---
+    local test_output_file
+    test_output_file=$(mktemp)
+    local attempt=0
+    local tests_passed=false
+
+    while true; do
+        # Run tests, capturing output
+        log "Running tests: $test_cmd"
+        local test_exit=0
+        eval "$test_cmd" 2>&1 | tee "$test_output_file" || test_exit=$?
+
+        if [[ $test_exit -eq 0 ]]; then
+            ok "Tests passed"
+            tests_passed=true
+            break
         fi
+
+        err "Tests failed"
+        attempt=$((attempt + 1))
+
+        if [[ $attempt -gt $max_retries ]]; then
+            break
+        fi
+
+        warn "Retry $attempt/$max_retries: re-invoking Claude to fix test failures..."
+
+        # Build retry prompt with last 100 lines of test output
+        local test_tail
+        test_tail=$(tail -100 "$test_output_file")
+        local retry_prompt="The tests are failing after your changes. Here is the test output:
+
+\`\`\`
+$test_tail
+\`\`\`
+
+Fix the test failures. Do not revert your previous work — fix the issues causing the failures. Run the tests after your fixes."
+
+        # Use half the round budget (min $1.00) for retries
+        local retry_budget
+        retry_budget=$(python3 -c "print(max(1.00, float('$max_budget') / 2))" 2>/dev/null || echo "1.00")
+
+        claude -p "$retry_prompt" \
+            --append-system-prompt "$system_context" \
+            --dangerously-skip-permissions \
+            --max-budget-usd "$retry_budget" \
+            --max-turns "$max_turns" \
+            --output-format json \
+            2>&1 | tee "/tmp/quality-pipeline-round-${round_num}-retry-${attempt}.log" || true
+
+        # Re-stage any new changes
+        git add -A
+    done
+
+    rm -f "$test_output_file"
+
+    if ! $tests_passed; then
+        err "Tests failed after round $round_num ($name) (exhausted $max_retries retries)"
+        err "Rolling back changes from this round..."
+        rollback_round "$pre_round_untracked"
         log_round_finish "$round_start_epoch" "$name" "tests failed"
+        # Gate: hard → return 1 (stop), soft → return 2 (continue)
+        [[ "$gate" == "soft" ]] && return 2
         return 1
     fi
 
@@ -439,6 +646,10 @@ Focus exclusively on the task described in the prompt. Do not do work that belon
     local commit_msg="${commit_prefix}${name} (round ${round_num}/${total_rounds})"
     git commit -m "$commit_msg" --no-gpg-sign 2>/dev/null || git commit -m "$commit_msg"
     ok "Committed: $commit_msg"
+
+    # Run reviewer pass (after successful commit)
+    run_reviewer "$round_num" "$round_file" "$name"
+
     log_round_finish "$round_start_epoch" "$name" "passed"
 }
 
@@ -468,6 +679,12 @@ main() {
             --test-command)
                 shift
                 TEST_COMMAND="$1"
+                ;;
+            --review)
+                REVIEW_FLAG="true"
+                ;;
+            --no-review)
+                REVIEW_FLAG="false"
                 ;;
             -h|--help)
                 usage
@@ -583,10 +800,16 @@ main() {
         name=$(frontmatter_field "${round_files[$i]}" "name")
         local budget
         budget=$(frontmatter_field "${round_files[$i]}" "max_budget_usd")
+        local gate
+        gate=$(frontmatter_field "${round_files[$i]}" "gate")
+        gate="${gate:-hard}"
+        local retries
+        retries=$(frontmatter_field "${round_files[$i]}" "max_retries")
+        retries="${retries:-0}"
         local marker=""
         [[ $n -lt $START_FROM ]] && marker=" (skip)"
         [[ $n -eq $START_FROM ]] && marker=" ← start"
-        log "  $n. $name [\$${budget:-5.00}]$marker"
+        log "  $n. $name [\$${budget:-5.00}] gate=$gate retries=$retries$marker"
     done
     echo ""
 
@@ -597,7 +820,7 @@ main() {
 
     # Run rounds
     PIPELINE_START_EPOCH=$(date +%s)
-    local passed=0 failed=0 skipped=0
+    local passed=0 hard_failed=0 soft_failed=0 skipped=0
     for i in "${!round_files[@]}"; do
         local n=$((i + 1))
         if [[ $n -lt $START_FROM ]]; then
@@ -605,16 +828,24 @@ main() {
             continue
         fi
 
-        if run_round "${round_files[$i]}" "$n" "$total" "$TEST_COMMAND"; then
-            passed=$((passed + 1))
-        else
-            failed=$((failed + 1))
-            err "Pipeline stopped at round $n."
-            if [[ $n -lt $total ]]; then
-                warn "Resume with: quality-pipeline.sh --start-from $((n + 1))"
-            fi
-            break
-        fi
+        local rc=0
+        run_round "${round_files[$i]}" "$n" "$total" "$TEST_COMMAND" || rc=$?
+
+        case $rc in
+            0)  passed=$((passed + 1)) ;;
+            1)  # Hard failure — stop pipeline
+                hard_failed=$((hard_failed + 1))
+                err "Pipeline stopped at round $n (hard gate failure)."
+                if [[ $n -lt $total ]]; then
+                    warn "Resume with: quality-pipeline.sh --start-from $((n + 1))"
+                fi
+                break
+                ;;
+            2)  # Soft failure — continue to next round
+                soft_failed=$((soft_failed + 1))
+                warn "Round $n failed (soft gate) — continuing to next round."
+                ;;
+        esac
     done
 
     # Summary
@@ -627,10 +858,11 @@ main() {
     log "Resources: $(get_resource_snapshot)"
     ok "Passed: $passed"
     [[ $skipped -gt 0 ]] && warn "Skipped: $skipped"
-    [[ $failed -gt 0 ]] && err "Failed: $failed"
+    [[ $soft_failed -gt 0 ]] && warn "Soft failures: $soft_failed (continued past)"
+    [[ $hard_failed -gt 0 ]] && err "Hard failures: $hard_failed (stopped pipeline)"
     log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    if [[ $failed -gt 0 ]]; then
+    if [[ $hard_failed -gt 0 ]]; then
         exit 1
     fi
 

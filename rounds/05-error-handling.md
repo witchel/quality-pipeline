@@ -4,6 +4,8 @@ order: 35
 commit_message_prefix: "fix: "
 max_budget_usd: 5.00
 max_turns: 20
+gate: hard
+max_retries: 1
 ---
 
 # Fix Error Handling
@@ -38,6 +40,20 @@ You are an error handling specialist. Your goal is to find and fix missing, inco
    - Check that temporary files/directories are cleaned up on both success and failure
 
 5. **Verify**: Run the test suite after each fix to confirm behavior is preserved.
+
+## Behavior Contract
+
+### MUST change
+- Bare except/catch blocks that silently swallow errors
+- Functions that return None/null on error instead of raising or returning an error type
+- Resource leaks in error paths (missing cleanup of files, connections, locks)
+- Ignored error return values (discarded with `_` or empty catch blocks)
+
+### MUST NOT change
+- Public API return types or function signatures
+- Logging configuration or log levels
+- Existing test files
+- Error message formatting conventions already established in the codebase
 
 ## What NOT to do
 

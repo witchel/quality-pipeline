@@ -17,7 +17,7 @@ The `/quality-pipeline` slash command is now available in any Claude Code sessio
 
 ```
 /quality-pipeline
-/quality-pipeline --rounds "add-tests dead-code"
+/quality-pipeline --rounds "audit-tests dead-code"
 /quality-pipeline --start-from 3
 /quality-pipeline --dry-run
 ```
@@ -26,7 +26,7 @@ The `/quality-pipeline` slash command is now available in any Claude Code sessio
 
 ```bash
 ~/.claude/plugins/quality-pipeline/scripts/quality-pipeline.sh \
-    --rounds "add-tests refactor concurrency dead-code simplify" \
+    --rounds "audit-tests refactor concurrency dead-code simplify" \
     --test-command "npm test"
 ```
 
@@ -40,31 +40,67 @@ The `/quality-pipeline` slash command is now available in any Claude Code sessio
 | `--start-from N` | Resume from round N (1-indexed) |
 | `--dry-run` | Show plan without executing |
 | `--test-command "CMD"` | Override auto-detected test command |
+| `--review` | Enable reviewer pass for all rounds |
+| `--no-review` | Disable reviewer pass for all rounds |
 
 ## Built-in Rounds
 
-| Round | Prefix | Budget | Description |
-|-------|--------|--------|-------------|
-| `add-tests` | `test:` | $5.00 | Add comprehensive tests for undertested code |
-| `refactor` | `refactor:` | $5.00 | Improve naming, structure, and clarity |
-| `concurrency` | `fix:` | $5.00 | Fix races, lost updates, and find parallelization opportunities |
-| `fault-tolerance` | `fix:` | $5.00 | Fix non-atomic writes, lost updates, missing fsync, and idempotency bugs |
-| `error-handling` | `fix:` | $5.00 | Fix swallowed errors, missing error paths, and inconsistent patterns |
-| `security` | `fix:` | $5.00 | Fix hardcoded secrets, injection vectors, and insecure defaults |
-| `type-safety` | `refactor:` | $5.00 | Add missing type annotations and tighten overly broad types |
-| `dead-code` | `chore:` | $3.00 | Remove unused imports, functions, and variables |
-| `dependency-hygiene` | `chore:` | $3.00 | Remove unused dependencies and flag deprecated API usage |
-| `simplify` | `style:` | $3.00 | Reduce unnecessary abstractions and complexity |
+| Round | Prefix | Budget | Gate | Retries | Review | Description |
+|-------|--------|--------|------|---------|--------|-------------|
+| `audit-tests` | `test:` | $5.00 | hard | 2 | | Audit test quality and fill coverage gaps with substantial, independent tests |
+| `refactor` | `refactor:` | $5.00 | soft | 1 | | Improve naming, structure, and clarity |
+| `concurrency` | `fix:` | $5.00 | hard | 0 | yes | Fix races, lost updates, and find parallelization opportunities |
+| `fault-tolerance` | `fix:` | $5.00 | hard | 0 | yes | Fix non-atomic writes, lost updates, missing fsync, and idempotency bugs |
+| `error-handling` | `fix:` | $5.00 | hard | 1 | | Fix swallowed errors, missing error paths, and inconsistent patterns |
+| `security` | `fix:` | $5.00 | hard | 0 | yes | Fix hardcoded secrets, injection vectors, and insecure defaults |
+| `type-safety` | `refactor:` | $5.00 | soft | 1 | | Add missing type annotations and tighten overly broad types |
+| `dead-code` | `chore:` | $3.00 | soft | 1 | | Remove unused imports, functions, and variables |
+| `dependency-hygiene` | `chore:` | $3.00 | soft | 1 | | Remove unused dependencies and flag deprecated API usage |
+| `simplify` | `style:` | $3.00 | soft | 1 | | Reduce unnecessary abstractions and complexity |
 
 ## How It Works
 
 1. Creates a branch `quality/YYYY-MM-DD-<hash>`
-2. For each round, invokes `claude -p` with a focused prompt
-3. Runs your test suite to verify nothing broke
-4. Creates a clean git commit with a conventional commit prefix
-5. Moves to the next round
+2. For each round:
+   a. Runs static analysis tools (if configured) and injects results into the prompt
+   b. Invokes `claude -p` with a focused prompt
+   c. Runs your test suite to verify nothing broke
+   d. On test failure: retries with test output (if `max_retries > 0`)
+   e. On final failure: rolls back and applies gate logic (hard=stop, soft=continue)
+   f. On success: commits and optionally runs a reviewer pass
+3. Moves to the next round
 
 Rounds interact exclusively through git state — each round starts a fresh Claude session that sees the updated codebase.
+
+## Gate Types
+
+Each round has a `gate` setting that controls what happens when tests fail:
+
+- **hard** (default): Pipeline stops. Use for correctness-critical rounds (tests, concurrency, security).
+- **soft**: Pipeline continues to the next round. Use for best-effort rounds (refactoring, dead code, simplify).
+- **none**: Tests are skipped entirely. Use for rounds that don't affect behavior.
+
+## Retry Loop
+
+When tests fail after a round, the pipeline can retry by re-invoking Claude with the test output. Set `max_retries` in the round frontmatter (default: 0). Each retry uses half the round's budget and shows Claude the last 100 lines of test output.
+
+## Static Analysis
+
+Rounds can be augmented with static analysis results. The pipeline runs configured analyzers before Claude and injects their output into the prompt. Default mappings:
+
+- `security` → bandit, semgrep
+- `type-safety` → mypy, pyright, tsc
+- `dead-code` → vulture
+
+Override per-round with the `analyzers` frontmatter field or `CONFIG_OVERRIDE_<NAME>_ANALYZERS` in pipeline.yaml.
+
+## Behavior Contracts
+
+Correctness-critical rounds (concurrency, fault-tolerance, error-handling, security) include Behavior Contract sections that specify what MUST change and what MUST NOT change. These constrain Claude's changes and give the reviewer something concrete to check against.
+
+## Reviewer Pass
+
+After a round commits, an optional reviewer pass invokes a fresh Claude session to review the diff. The reviewer checks for correctness, contract compliance, scope creep, test quality, and subtle regressions. Enable per-round with `review: true` in frontmatter, or globally with `--review`.
 
 ## Per-Project Configuration
 
@@ -72,13 +108,19 @@ Drop a `.claude/pipeline.yaml` in your project:
 
 ```yaml
 test_command: "pytest tests/"
-rounds: [add-tests, refactor, concurrency, fault-tolerance, error-handling, security, type-safety, dead-code, dependency-hygiene, simplify]
+rounds: [audit-tests, refactor, concurrency, fault-tolerance, error-handling, security, type-safety, dead-code, dependency-hygiene, simplify]
 branch_prefix: "quality/"
 max_budget_usd: 20.00
 overrides:
-  add-tests:
+  audit-tests:
     max_budget_usd: 8.00
     append_prompt: "Use pytest with fixtures"
+  dead-code:
+    gate: none
+    max_retries: 0
+  security:
+    review: true
+    analyzers: "bandit semgrep"
 ```
 
 ## Custom Rounds
@@ -92,12 +134,21 @@ order: 25
 commit_message_prefix: "feat: "
 max_budget_usd: 5.00
 max_turns: 20
+gate: hard
+max_retries: 1
+review: false
 ---
 
 # My Custom Round
 
 Your prompt here...
 ```
+
+New fields (all optional, with backward-compatible defaults):
+- `gate`: `hard` (default), `soft`, or `none`
+- `max_retries`: number of retry attempts on test failure (default: 0)
+- `review`: `true` or `false` — run a reviewer pass after commit (default: false)
+- `analyzers`: space-separated list of static analysis tools to run before the round
 
 ## Test Command Detection
 
@@ -116,4 +167,6 @@ Override with `--test-command` or `test_command` in pipeline.yaml.
 
 - If a round fails, previous rounds' commits are preserved on the branch
 - Resume with `--start-from N` to skip completed rounds
-- If tests fail after a round, changes are rolled back and the pipeline stops
+- **Hard gate** rounds: test failure rolls back changes and stops the pipeline
+- **Soft gate** rounds: test failure rolls back changes but continues to the next round
+- Retry loop (if configured) re-invokes Claude with test output before giving up

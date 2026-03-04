@@ -4,6 +4,9 @@ order: 25
 commit_message_prefix: "fix: "
 max_budget_usd: 5.00
 max_turns: 20
+gate: hard
+max_retries: 0
+review: true
 ---
 
 # Fix Concurrency Bugs and Find Parallelization Opportunities
@@ -48,6 +51,20 @@ You are a concurrency specialist. Your goal is to fix data races, race condition
    - Only parallelize when the operations are genuinely independent and the overhead is justified (don't parallelize two 1ms operations)
 
 6. **Verify**: Run the test suite after each fix to confirm behavior is preserved.
+
+## Behavior Contract
+
+### MUST change
+- Unprotected shared writes (multiple goroutines/threads writing without a lock or atomic)
+- Read-modify-write sequences on shared state without synchronization
+- TOCTOU patterns on shared resources without atomic operations
+- Missing context propagation in long-running concurrent operations
+
+### MUST NOT change
+- Single-threaded code paths (do not add locks where no concurrent access exists)
+- The concurrency model itself (do not convert threads to async, goroutines to channels, etc.)
+- Existing test files
+- Public API signatures or return types
 
 ## What NOT to do
 

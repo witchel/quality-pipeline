@@ -4,6 +4,10 @@ order: 45
 commit_message_prefix: "fix: "
 max_budget_usd: 5.00
 max_turns: 20
+gate: hard
+max_retries: 0
+review: true
+analyzers: bandit semgrep
 ---
 
 # Security Audit
@@ -40,6 +44,20 @@ You are a security specialist. Your goal is to find and fix vulnerabilities — 
    - Missing scrubbing of sensitive fields before serialization
 
 5. **Verify**: Run the test suite after each fix to confirm behavior is preserved.
+
+## Behavior Contract
+
+### MUST change
+- Hardcoded secrets, API keys, or credentials in source code
+- SQL queries built with string concatenation or f-strings
+- User input passed to shell commands without sanitization
+- Unsafe YAML/XML loading (yaml.load without SafeLoader, XML without disabling external entities)
+
+### MUST NOT change
+- Authentication or authorization architecture
+- Cryptographic library choices or algorithm selections
+- Existing test files
+- Security infrastructure (CORS, CSP, rate limiting)
 
 ## What NOT to do
 

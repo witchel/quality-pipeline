@@ -4,6 +4,8 @@ order: 40
 commit_message_prefix: "style: "
 max_budget_usd: 3.00
 max_turns: 15
+gate: soft
+max_retries: 1
 ---
 
 # Simplify

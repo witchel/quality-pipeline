@@ -4,6 +4,8 @@ order: 75
 commit_message_prefix: "chore: "
 max_budget_usd: 3.00
 max_turns: 15
+gate: soft
+max_retries: 1
 ---
 
 # Dependency Hygiene
