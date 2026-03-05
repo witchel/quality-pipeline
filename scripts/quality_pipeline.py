@@ -136,6 +136,15 @@ C = ColorOutput()
 # ---------------------------------------------------------------------------
 
 
+def gate_label(gate: str) -> str:
+    labels = {
+        "hard": f"{C.RED}HARD{C.NC}",
+        "soft": f"{C.YELLOW}SOFT{C.NC}",
+        "none": f"{C.BLUE}NONE{C.NC}",
+    }
+    return labels.get(gate, gate)
+
+
 def format_duration(secs: int) -> str:
     if secs >= 3600:
         return f"{secs // 3600}h {secs % 3600 // 60}m {secs % 60}s"
@@ -333,6 +342,12 @@ class PipelineCleanup:
         return p
 
     def cleanup(self) -> None:
+        # Block signals so cleanup can't be interrupted mid-way
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
         if self.monitor:
             self.monitor.stop()
         for f in self.temp_files:
@@ -395,6 +410,8 @@ def _handle_signal(signum: int, _frame: object) -> None:  # noqa: ARG001
 
 signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
+if hasattr(signal, "SIGHUP"):
+    signal.signal(signal.SIGHUP, _handle_signal)
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +521,7 @@ def detect_test_command(project_dir: Path) -> Optional[str]:
 def _run_analyzer(name: str, args: list[str], project_dir: Path,
                   prerequisites: Optional[list[str]] = None) -> str:
     """Run a single analyzer tool if available. Returns output or empty string."""
-    if not shutil.which(name if name != "tsc" else "tsc"):
+    if not shutil.which(name):
         return ""
     # Check tool-specific prerequisites
     if prerequisites:
@@ -647,15 +664,21 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
     )
 
 
+def _find_override(name: str, config: PipelineConfig) -> dict:
+    """Look up per-round override dict, normalizing dashes/underscores."""
+    ov = config.overrides.get(name)
+    if ov:
+        return ov
+    normalized = name.replace("-", "_")
+    for key, val in config.overrides.items():
+        if key.replace("-", "_") == normalized:
+            return val
+    return {}
+
+
 def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConfig:
     """Apply per-round config overrides to a RoundConfig."""
-    ov = config.overrides.get(rc.name)
-    if not ov:
-        # Try with underscores/dashes
-        for key in config.overrides:
-            if key.replace("-", "_") == rc.name.replace("-", "_"):
-                ov = config.overrides[key]
-                break
+    ov = _find_override(rc.name, config)
     if not ov:
         return rc
 
@@ -675,12 +698,7 @@ def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConf
 
 def apply_config_prompt_append(rc_name: str, prompt: str, config: PipelineConfig) -> str:
     """Append config override prompt text if present."""
-    ov = config.overrides.get(rc_name)
-    if not ov:
-        for key in config.overrides:
-            if key.replace("-", "_") == rc_name.replace("-", "_"):
-                ov = config.overrides[key]
-                break
+    ov = _find_override(rc_name, config)
     if ov and ov.get("append_prompt"):
         prompt += "\n\n" + ov["append_prompt"]
     return prompt
@@ -773,7 +791,12 @@ def git_commit(msg: str) -> None:
     """Commit staged changes."""
     result = git("commit", "-m", msg, "--no-gpg-sign", check=False)
     if result.returncode != 0:
-        git("commit", "-m", msg)
+        stderr = result.stderr or ""
+        if "gpg" in stderr.lower() or "sign" in stderr.lower():
+            git("commit", "-m", msg)
+        else:
+            C.err(f"git commit failed: {stderr.strip()}")
+            raise subprocess.CalledProcessError(result.returncode, "git commit")
 
 
 def git_acquire_lock(dry_run: bool) -> Optional[Path]:
@@ -841,13 +864,18 @@ def run_tests_with_tee(cmd: str, output_file: Path) -> int:
     proc = subprocess.Popen(
         cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
-    with output_file.open("w") as fout:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            fout.write(line)
-    return proc.wait()
+    try:
+        with output_file.open("w") as fout:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    fout.write(line)
+        return proc.wait()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
 
 
 def run_claude(
@@ -887,12 +915,7 @@ def run_reviewer(
     if review_flag is not None:
         review_enabled = review_flag
     else:
-        ov = config.overrides.get(rc.name, {})
-        if not ov:
-            for key in config.overrides:
-                if key.replace("-", "_") == rc.name.replace("-", "_"):
-                    ov = config.overrides[key]
-                    break
+        ov = _find_override(rc.name, config)
         if "review" in ov:
             val = ov["review"]
             review_enabled = val if isinstance(val, bool) else str(val).lower() == "true"
@@ -904,16 +927,9 @@ def run_reviewer(
 
     C.log("Running reviewer pass...")
 
-    # Get diff
-    try:
-        diff_result = git("diff", pre_sha, "HEAD", check=False)
-        diff_content = diff_result.stdout[:8000]
-    except Exception:
-        try:
-            diff_result = git("diff", "HEAD~1", check=False)
-            diff_content = diff_result.stdout[:8000]
-        except Exception:
-            diff_content = ""
+    # Get diff (check=False means git() won't raise on non-zero exit)
+    diff_result = git("diff", pre_sha, "HEAD", check=False)
+    diff_content = diff_result.stdout[:8000] if diff_result.stdout else ""
 
     if not diff_content:
         C.warn("No diff to review — skipping reviewer")
@@ -989,20 +1005,12 @@ def run_round(
     prompt = get_round_prompt(round_file)
     prompt = apply_config_prompt_append(rc.name, prompt, config)
 
-    # Gate label
-    gate_labels = {
-        "hard": f"{C.RED}HARD{C.NC}",
-        "soft": f"{C.YELLOW}SOFT{C.NC}",
-        "none": f"{C.BLUE}NONE{C.NC}",
-    }
-    gate_label = gate_labels.get(rc.gate, rc.gate)
-
     print()
     C.log("\u2501" * 60)
     C.log(f"{C.BOLD}Round {round_num}/{total_rounds}: {rc.name}{C.NC}")
     C.log(
         f"Budget: ${rc.max_budget_usd:.2f} | Max turns: {rc.max_turns} | "
-        f"Gate: {gate_label} | Retries: {rc.max_retries}"
+        f"Gate: {gate_label(rc.gate)} | Retries: {rc.max_retries}"
     )
     C.log("\u2501" * 60)
 
@@ -1352,20 +1360,12 @@ def pipeline(
             prompt = get_round_prompt(rf)
             prompt = apply_config_prompt_append(rc.name, prompt, config)
 
-            # Gate label
-            gate_labels = {
-                "hard": f"{C.RED}HARD{C.NC}",
-                "soft": f"{C.YELLOW}SOFT{C.NC}",
-                "none": f"{C.BLUE}NONE{C.NC}",
-            }
-            gate_label = gate_labels.get(rc.gate, rc.gate)
-
             print()
             C.log("\u2501" * 60)
             C.log(f"{C.BOLD}Round {n}/{total}: {rc.name}{C.NC}")
             C.log(
                 f"Budget: ${rc.max_budget_usd:.2f} | Max turns: {rc.max_turns} | "
-                f"Gate: {gate_label} | Retries: {rc.max_retries}"
+                f"Gate: {gate_label(rc.gate)} | Retries: {rc.max_retries}"
             )
             C.log("\u2501" * 60)
 
@@ -1374,12 +1374,7 @@ def pipeline(
             if review_flag is not None:
                 review_status = f"{str(review_flag).lower()} (CLI)"
             else:
-                ov = config.overrides.get(rc.name, {})
-                if not ov:
-                    for key in config.overrides:
-                        if key.replace("-", "_") == rc.name.replace("-", "_"):
-                            ov = config.overrides[key]
-                            break
+                ov = _find_override(rc.name, config)
                 if "review" in ov:
                     review_status = f"{str(ov['review']).lower()} (config)"
                 else:
@@ -1409,16 +1404,10 @@ def pipeline(
             results.append(RoundResult(rc.name, RoundOutcome.SKIPPED))
             continue
 
-        pre_sha = git_rev_parse_head()
         outcome = run_round(
             rf, n, total, effective_test_cmd, config, review_flag, log_dir, gpu_type
         )
         _cleanup.current_round = ""
-
-        # Distinguish pass from no-changes
-        if outcome == RoundOutcome.PASSED:
-            if git_rev_parse_head() == pre_sha:
-                outcome = RoundOutcome.NO_CHANGES
 
         results.append(RoundResult(rc.name, outcome))
 
