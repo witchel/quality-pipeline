@@ -25,7 +25,7 @@ The `/quality-pipeline` slash command is now available in any Claude Code sessio
 ### Headless (terminal)
 
 ```bash
-~/.claude/plugins/quality-pipeline/scripts/quality-pipeline.sh \
+uv run ~/.claude/plugins/quality-pipeline/scripts/quality_pipeline.py \
     --rounds "audit-tests refactor concurrency dead-code simplify" \
     --test-command "npm test"
 ```
@@ -39,9 +39,12 @@ The `/quality-pipeline` slash command is now available in any Claude Code sessio
 | `--config FILE` | Path to pipeline.yaml config |
 | `--start-from N` | Resume from round N (1-indexed) |
 | `--dry-run` | Show plan without executing |
+| `--worktree` | Run in an isolated git worktree (safe with uncommitted changes) |
+| `--worktree-symlinks "d1 d2"` | Space-separated dirs to symlink into worktree |
 | `--test-command "CMD"` | Override auto-detected test command |
 | `--review` | Enable reviewer pass for all rounds |
 | `--no-review` | Disable reviewer pass for all rounds |
+| `--log-dir DIR` | Directory for log files |
 
 ## Built-in Rounds
 
@@ -60,7 +63,7 @@ The `/quality-pipeline` slash command is now available in any Claude Code sessio
 
 ## How It Works
 
-1. Creates a branch `quality/YYYY-MM-DD-<hash>`
+1. Creates a branch `quality/YYYY-MM-DD-<hash>` (optionally in an isolated worktree with `--worktree`)
 2. For each round:
    a. Runs static analysis tools (if configured) and injects results into the prompt
    b. Invokes `claude -p` with a focused prompt
@@ -92,7 +95,7 @@ Rounds can be augmented with static analysis results. The pipeline runs configur
 - `type-safety` → mypy, pyright, tsc
 - `dead-code` → vulture
 
-Override per-round with the `analyzers` frontmatter field or `CONFIG_OVERRIDE_<NAME>_ANALYZERS` in pipeline.yaml.
+Override per-round with the `analyzers` frontmatter field or via `overrides` in pipeline.yaml.
 
 ## Behavior Contracts
 
@@ -130,13 +133,13 @@ Add a markdown file to `rounds/` with YAML frontmatter:
 ```markdown
 ---
 name: my-round
-order: 25
 commit_message_prefix: "feat: "
 max_budget_usd: 5.00
 max_turns: 20
 gate: hard
 max_retries: 1
 review: false
+analyzers: "mypy pyright"
 ---
 
 # My Custom Round
@@ -144,11 +147,18 @@ review: false
 Your prompt here...
 ```
 
-New fields (all optional, with backward-compatible defaults):
-- `gate`: `hard` (default), `soft`, or `none`
-- `max_retries`: number of retry attempts on test failure (default: 0)
-- `review`: `true` or `false` — run a reviewer pass after commit (default: false)
-- `analyzers`: space-separated list of static analysis tools to run before the round
+Frontmatter fields (all optional, with backward-compatible defaults):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `name` | `""` | Round identifier (used for config overrides and display) |
+| `commit_message_prefix` | `"chore: "` | Git commit message prefix |
+| `max_budget_usd` | `5.00` | Claude API budget cap |
+| `max_turns` | `20` | Maximum Claude conversation turns |
+| `gate` | `"hard"` | `hard`, `soft`, or `none` (see Gate Types) |
+| `max_retries` | `0` | Retry attempts on test failure |
+| `review` | `false` | Run a reviewer pass after commit |
+| `analyzers` | `""` | Space-separated static analysis tools to run |
 
 ## Test Command Detection
 

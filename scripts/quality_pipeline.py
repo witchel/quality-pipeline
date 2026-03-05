@@ -27,10 +27,9 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 import click
 import yaml
@@ -44,10 +43,10 @@ PLUGIN_DIR = SCRIPT_DIR.parent
 ROUNDS_DIR = PLUGIN_DIR / "rounds"
 TEMPLATE_DIR = PLUGIN_DIR / "templates"
 
-DEFAULT_SYMLINK_DIRS = (
-    "node_modules .venv venv .tox .mypy_cache .pytest_cache "
-    ".next .nuxt vendor .bundle"
-).split()
+DEFAULT_SYMLINK_DIRS: list[str] = [
+    "node_modules", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache",
+    ".next", ".nuxt", "vendor", ".bundle",
+]
 
 ENV_FILES = [".env", ".env.local", ".env.test"]
 
@@ -74,7 +73,7 @@ class RoundConfig:
     max_turns: int = 20
     gate: str = "hard"
     max_retries: int = 0
-    review: Optional[bool] = None  # None = not set (defaults to False)
+    review: bool | None = None  # None = not set (defaults to False)
     analyzers: str = ""
 
 
@@ -83,7 +82,7 @@ class PipelineConfig:
     test_command: str = ""
     rounds: list[str] = field(default_factory=list)
     branch_prefix: str = ""
-    max_budget_usd: Optional[float] = None
+    max_budget_usd: float | None = None
     overrides: dict[str, dict] = field(default_factory=dict)
 
 
@@ -325,11 +324,11 @@ class PipelineCleanup:
 
     def __init__(self) -> None:
         self.temp_files: list[Path] = []
-        self.worktree_dir: Optional[Path] = None
-        self.original_dir: Optional[Path] = None
+        self.worktree_dir: Path | None = None
+        self.original_dir: Path | None = None
         self.symlink_dirs: list[str] = []
-        self.lock_dir: Optional[Path] = None
-        self.monitor: Optional[ResourceMonitor] = None
+        self.lock_dir: Path | None = None
+        self.monitor: ResourceMonitor | None = None
         self.current_round: str = ""
         self.worktree_mode: bool = False
         atexit.register(self.cleanup)
@@ -373,8 +372,8 @@ class PipelineCleanup:
         wt = self.worktree_dir
         self.worktree_dir = None
 
-        orig = self.original_dir or Path("/")
-        os.chdir(orig)
+        if self.original_dir:
+            os.chdir(self.original_dir)
 
         # Remove symlinks first
         for d in self.symlink_dirs:
@@ -419,7 +418,7 @@ if hasattr(signal, "SIGHUP"):
 # ---------------------------------------------------------------------------
 
 
-def detect_test_command(project_dir: Path) -> Optional[str]:
+def detect_test_command(project_dir: Path) -> str | None:
     """Auto-detect the test command for a project.
 
     Priority: CLAUDE.md -> Makefile -> package.json -> pyproject.toml ->
@@ -519,7 +518,7 @@ def detect_test_command(project_dir: Path) -> Optional[str]:
 
 
 def _run_analyzer(name: str, args: list[str], project_dir: Path,
-                  prerequisites: Optional[list[str]] = None) -> str:
+                  prerequisites: list[str] | None = None) -> str:
     """Run a single analyzer tool if available. Returns output or empty string."""
     if not shutil.which(name):
         return ""
@@ -554,7 +553,7 @@ def run_static_analysis(
 
     python_prereqs = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"]
 
-    analyzer_defs: dict[str, tuple[list[str], Optional[list[str]]]] = {
+    analyzer_defs: dict[str, tuple[list[str], list[str] | None]] = {
         "bandit": (
             ["bandit", "-r", ".", "-f", "txt", "--severity-filter", "medium"],
             python_prereqs,
@@ -600,6 +599,15 @@ def run_static_analysis(
 # ---------------------------------------------------------------------------
 
 
+def _parse_review_bool(val: object) -> bool | None:
+    """Convert a review field value to bool | None."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.lower() == "true"
+    return None
+
+
 def parse_frontmatter(path: Path) -> RoundConfig:
     """Parse YAML frontmatter from a round file into RoundConfig."""
     text = path.read_text()
@@ -613,13 +621,7 @@ def parse_frontmatter(path: Path) -> RoundConfig:
     except yaml.YAMLError:
         return RoundConfig()
 
-    review_val = data.get("review")
-    if isinstance(review_val, bool):
-        review = review_val
-    elif isinstance(review_val, str):
-        review = review_val.lower() == "true"
-    else:
-        review = None
+    review = _parse_review_bool(data.get("review"))
 
     return RoundConfig(
         name=str(data.get("name", "")),
@@ -667,7 +669,7 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
 def _find_override(name: str, config: PipelineConfig) -> dict:
     """Look up per-round override dict, normalizing dashes/underscores."""
     ov = config.overrides.get(name)
-    if ov:
+    if ov is not None:
         return ov
     normalized = name.replace("-", "_")
     for key, val in config.overrides.items():
@@ -677,11 +679,12 @@ def _find_override(name: str, config: PipelineConfig) -> dict:
 
 
 def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConfig:
-    """Apply per-round config overrides to a RoundConfig."""
+    """Apply per-round config overrides, returning a new RoundConfig."""
     ov = _find_override(rc.name, config)
     if not ov:
         return rc
 
+    rc = replace(rc)
     if "max_budget_usd" in ov:
         rc.max_budget_usd = float(ov["max_budget_usd"])
     if "gate" in ov:
@@ -689,8 +692,7 @@ def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConf
     if "max_retries" in ov:
         rc.max_retries = int(ov["max_retries"])
     if "review" in ov:
-        val = ov["review"]
-        rc.review = val if isinstance(val, bool) else str(val).lower() == "true"
+        rc.review = _parse_review_bool(ov["review"])
     if "analyzers" in ov:
         rc.analyzers = str(ov["analyzers"])
     return rc
@@ -716,7 +718,7 @@ def discover_rounds() -> list[Path]:
     return sorted(f for f in ROUNDS_DIR.glob("*.md") if f.is_file())
 
 
-def resolve_round_file(name: str) -> Optional[Path]:
+def resolve_round_file(name: str) -> Path | None:
     """Resolve a round name to its file path."""
     for f in ROUNDS_DIR.glob("*.md"):
         if not f.is_file():
@@ -751,7 +753,8 @@ def git_has_uncommitted() -> bool:
 
 def git_untracked_files() -> set[str]:
     result = git("ls-files", "--others", "--exclude-standard")
-    return set(result.stdout.strip().splitlines()) if result.stdout.strip() else set()
+    output = result.stdout.strip()
+    return set(output.splitlines()) if output else set()
 
 
 def git_stage_round_changes(pre_untracked: set[str]) -> None:
@@ -799,7 +802,7 @@ def git_commit(msg: str) -> None:
             raise subprocess.CalledProcessError(result.returncode, "git commit")
 
 
-def git_acquire_lock(dry_run: bool) -> Optional[Path]:
+def git_acquire_lock(dry_run: bool) -> Path | None:
     """Acquire a lock to prevent concurrent pipeline runs."""
     if dry_run:
         return None
@@ -901,27 +904,38 @@ def run_claude(
     return result.returncode
 
 
+def _parse_verdict(raw: str) -> str:
+    """Extract verdict string from reviewer output (possibly JSON-wrapped)."""
+    # Unwrap claude JSON output wrapper: {"result": "..."}
+    try:
+        outer = json.loads(raw)
+        if isinstance(outer, dict) and "result" in outer:
+            raw = outer["result"]
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = [line for line in text.split("\n") if not line.startswith("```")]
+        text = "\n".join(lines)
+
+    try:
+        d = json.loads(text)
+        return d.get("verdict", "unknown")
+    except (json.JSONDecodeError, ValueError):
+        return "unknown"
+
+
 def run_reviewer(
     round_num: int,
     rc: RoundConfig,
     pre_sha: str,
     log_dir: Path,
-    review_flag: Optional[bool],
-    config: PipelineConfig,
+    review_flag: bool | None,
 ) -> None:
     """Run the reviewer pass if enabled."""
-    # Determine if review is enabled: CLI flag > config override > frontmatter
-    review_enabled: Optional[bool] = None
-    if review_flag is not None:
-        review_enabled = review_flag
-    else:
-        ov = _find_override(rc.name, config)
-        if "review" in ov:
-            val = ov["review"]
-            review_enabled = val if isinstance(val, bool) else str(val).lower() == "true"
-        else:
-            review_enabled = rc.review
-
+    # CLI flag > config/frontmatter (already merged by apply_config_overrides)
+    review_enabled = review_flag if review_flag is not None else rc.review
     if not review_enabled:
         return
 
@@ -955,24 +969,7 @@ def run_reviewer(
         result = subprocess.run(cmd, stdout=fout, stderr=subprocess.STDOUT, check=False)
     C.log(f"Reviewer claude finished (exit {result.returncode})")
 
-    # Parse verdict
-    verdict = "unknown"
-    try:
-        raw = review_output.read_text()
-        try:
-            outer = json.loads(raw)
-            if isinstance(outer, dict) and "result" in outer:
-                raw = outer["result"]
-        except (json.JSONDecodeError, ValueError):
-            pass
-        text = raw.strip()
-        if text.startswith("```"):
-            lines = [l for l in text.split("\n") if not l.startswith("```")]
-            text = "\n".join(lines)
-        d = json.loads(text)
-        verdict = d.get("verdict", "unknown")
-    except Exception:
-        pass
+    verdict = _parse_verdict(review_output.read_text())
 
     if verdict == "pass":
         C.ok(f"Reviewer: {C.GREEN}PASS{C.NC}")
@@ -984,13 +981,25 @@ def run_reviewer(
         C.warn(f"Reviewer: could not parse verdict — see {review_output}")
 
 
+def _print_round_header(round_num: int, total: int, rc: RoundConfig) -> None:
+    """Print the standard round header banner."""
+    print()
+    C.log("\u2501" * 60)
+    C.log(f"{C.BOLD}Round {round_num}/{total}: {rc.name}{C.NC}")
+    C.log(
+        f"Budget: ${rc.max_budget_usd:.2f} | Max turns: {rc.max_turns} | "
+        f"Gate: {gate_label(rc.gate)} | Retries: {rc.max_retries}"
+    )
+    C.log("\u2501" * 60)
+
+
 def run_round(
     round_file: Path,
     round_num: int,
     total_rounds: int,
     test_cmd: str,
     config: PipelineConfig,
-    review_flag: Optional[bool],
+    review_flag: bool | None,
     log_dir: Path,
     gpu_type: str,
 ) -> RoundOutcome:
@@ -1005,14 +1014,7 @@ def run_round(
     prompt = get_round_prompt(round_file)
     prompt = apply_config_prompt_append(rc.name, prompt, config)
 
-    print()
-    C.log("\u2501" * 60)
-    C.log(f"{C.BOLD}Round {round_num}/{total_rounds}: {rc.name}{C.NC}")
-    C.log(
-        f"Budget: ${rc.max_budget_usd:.2f} | Max turns: {rc.max_turns} | "
-        f"Gate: {gate_label(rc.gate)} | Retries: {rc.max_retries}"
-    )
-    C.log("\u2501" * 60)
+    _print_round_header(round_num, total_rounds, rc)
 
     # Build system context
     system_context = (
@@ -1093,7 +1095,7 @@ def run_round(
         commit_msg = f"{rc.commit_message_prefix}{rc.name} (round {round_num}/{total_rounds})"
         git_commit(commit_msg)
         C.ok(f"Committed: {commit_msg} (gate=none, tests skipped)")
-        run_reviewer(round_num, rc, pre_sha, log_dir, review_flag, config)
+        run_reviewer(round_num, rc, pre_sha, log_dir, review_flag)
         _finish("passed")
         _cleanup.current_round = ""
         return RoundOutcome.PASSED
@@ -1157,7 +1159,7 @@ def run_round(
     C.ok(f"Committed: {commit_msg}")
 
     # Run reviewer
-    run_reviewer(round_num, rc, pre_sha, log_dir, review_flag, config)
+    run_reviewer(round_num, rc, pre_sha, log_dir, review_flag)
 
     _finish("passed")
     _cleanup.current_round = ""
@@ -1170,16 +1172,16 @@ def run_round(
 
 
 def pipeline(
-    project_dir: Optional[str],
-    rounds_arg: Optional[str],
-    config_file: Optional[str],
+    project_dir: str | None,
+    rounds_arg: str | None,
+    config_file: str | None,
     start_from: int,
     dry_run: bool,
     worktree: bool,
-    worktree_symlinks: Optional[str],
-    test_command: Optional[str],
-    review_flag: Optional[bool],
-    log_dir_arg: Optional[str],
+    worktree_symlinks: str | None,
+    test_command: str | None,
+    review_flag: bool | None,
+    log_dir_arg: str | None,
 ) -> None:
     """Main pipeline orchestrator."""
     # Change to project directory
@@ -1360,14 +1362,7 @@ def pipeline(
             prompt = get_round_prompt(rf)
             prompt = apply_config_prompt_append(rc.name, prompt, config)
 
-            print()
-            C.log("\u2501" * 60)
-            C.log(f"{C.BOLD}Round {n}/{total}: {rc.name}{C.NC}")
-            C.log(
-                f"Budget: ${rc.max_budget_usd:.2f} | Max turns: {rc.max_turns} | "
-                f"Gate: {gate_label(rc.gate)} | Retries: {rc.max_retries}"
-            )
-            C.log("\u2501" * 60)
+            _print_round_header(n, total, rc)
 
             # Review status
             review_status: str
@@ -1491,16 +1486,16 @@ def pipeline(
 @click.option("--review/--no-review", default=None, help="Force reviewer pass on/off")
 @click.option("--log-dir", default=None, help="Directory for log files")
 def cli(
-    project_dir: Optional[str],
-    rounds: Optional[str],
-    config_file: Optional[str],
+    project_dir: str | None,
+    rounds: str | None,
+    config_file: str | None,
     start_from: int,
     dry_run: bool,
     worktree: bool,
-    worktree_symlinks: Optional[str],
-    test_command: Optional[str],
-    review: Optional[bool],
-    log_dir: Optional[str],
+    worktree_symlinks: str | None,
+    test_command: str | None,
+    review: bool | None,
+    log_dir: str | None,
 ) -> None:
     """Multi-round automated code quality pipeline.
 

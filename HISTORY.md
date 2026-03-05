@@ -34,3 +34,31 @@ setup. Key improvements:
 - **Click handles CLI parsing** — `--review/--no-review` gives
   `True`/`False`/`None` natively, `--start-from` gets integer validation for
   free.
+
+---
+
+## 2026-03-04 — Code quality pass on the Python pipeline
+
+Several improvements to the Python script, all verified against the existing
+58-test suite:
+
+- **`apply_config_overrides` no longer mutates its input** — previously it
+  modified the `RoundConfig` in-place *and* returned it, a classic Python
+  footgun. Now uses `dataclasses.replace()` to create a shallow copy before
+  applying overrides.
+- **Extracted `_parse_verdict()`** from `run_reviewer` — the deeply nested
+  try/except JSON parsing block (handling `{"result": ...}` wrappers and
+  markdown code fences) is now a focused, independently testable function.
+- **DRY round header printing** — the identical 5-line header block was
+  duplicated between `run_round` and the dry-run path in `pipeline()`.
+  Extracted to `_print_round_header()`.
+- **Type annotations modernized** — replaced all `Optional[X]` with `X | None`
+  (the file already imports `from __future__ import annotations`). Fixed pyright
+  type errors with `DEFAULT_SYMLINK_DIRS` list literal.
+- **Defensive `_cleanup_worktree`** — removed the `or Path("/")` fallback that
+  would `os.chdir("/")` if `original_dir` was never set. Now only chdir when
+  there's an actual original directory to return to.
+- **README updated** — added missing `--worktree`, `--worktree-symlinks`, and
+  `--log-dir` options. Replaced reference to deleted `quality-pipeline.sh`.
+  Replaced stale `CONFIG_OVERRIDE_<NAME>_ANALYZERS` reference. Added frontmatter
+  field reference table.
