@@ -10,13 +10,17 @@ Run the automated multi-round code quality pipeline.
 
 ## Options
 
+- `--project-dir DIR` — Run in DIR instead of current directory
 - `--rounds "round1 round2 ..."` — Specify which rounds to run (default: all rounds in `rounds/` directory)
 - `--config path/to/pipeline.yaml` — Use a custom pipeline config file
 - `--start-from N` — Resume pipeline from round N (1-indexed)
 - `--dry-run` — Show what would happen without running anything
+- `--worktree` — Run in an isolated git worktree (safe with uncommitted changes)
+- `--worktree-symlinks "d1 d2"` — Space-separated dirs to symlink into worktree
 - `--test-command "cmd"` — Override auto-detected test command
 - `--review` — Enable reviewer pass for all rounds
 - `--no-review` — Disable reviewer pass for all rounds
+- `--log-dir DIR` — Directory for log files
 
 ## What This Does
 

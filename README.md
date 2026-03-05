@@ -48,18 +48,18 @@ uv run ~/.claude/plugins/quality-pipeline/scripts/quality_pipeline.py \
 
 ## Built-in Rounds
 
-| Round | Prefix | Time | Gate | Retries | Review | Description |
-|-------|--------|------|------|---------|--------|-------------|
-| `audit-tests` | `test:` | 20m | hard | 2 | | Audit test quality and fill coverage gaps with substantial, independent tests |
-| `refactor` | `refactor:` | 20m | soft | 1 | | Improve naming, structure, and clarity |
-| `concurrency` | `fix:` | 15m | hard | 0 | yes | Fix races, lost updates, and find parallelization opportunities |
-| `fault-tolerance` | `fix:` | 15m | hard | 0 | yes | Fix non-atomic writes, lost updates, missing fsync, and idempotency bugs |
-| `error-handling` | `fix:` | 15m | hard | 1 | | Fix swallowed errors, missing error paths, and inconsistent patterns |
-| `security` | `fix:` | 20m | hard | 0 | yes | Fix hardcoded secrets, injection vectors, and insecure defaults |
-| `type-safety` | `refactor:` | 15m | soft | 1 | | Add missing type annotations and tighten overly broad types |
-| `dead-code` | `chore:` | 10m | soft | 1 | | Remove unused imports, functions, and variables |
-| `dependency-hygiene` | `chore:` | 10m | soft | 1 | | Remove unused dependencies and flag deprecated API usage |
-| `simplify` | `style:` | 10m | soft | 1 | | Reduce unnecessary abstractions and complexity |
+| Round | Prefix | Turns | Time | Gate | Retries | Review | Description |
+|-------|--------|-------|------|------|---------|--------|-------------|
+| `audit-tests` | `test:` | 40 | 20m | hard | 2 | | Audit test quality and fill coverage gaps with substantial, independent tests |
+| `refactor` | `refactor:` | 40 | 20m | soft | 1 | | Improve naming, structure, and clarity |
+| `concurrency` | `fix:` | 30 | 15m | hard | 0 | yes | Fix races, lost updates, and find parallelization opportunities |
+| `fault-tolerance` | `fix:` | 30 | 15m | hard | 0 | yes | Fix non-atomic writes, lost updates, missing fsync, and idempotency bugs |
+| `error-handling` | `fix:` | 30 | 15m | hard | 1 | | Fix swallowed errors, missing error paths, and inconsistent patterns |
+| `security` | `fix:` | 40 | 20m | hard | 0 | yes | Fix hardcoded secrets, injection vectors, and insecure defaults |
+| `type-safety` | `refactor:` | 30 | 15m | soft | 1 | | Add missing type annotations and tighten overly broad types |
+| `dead-code` | `chore:` | 20 | 10m | soft | 1 | | Remove unused imports, functions, and variables |
+| `dependency-hygiene` | `chore:` | 20 | 10m | soft | 1 | | Remove unused dependencies and flag deprecated API usage |
+| `simplify` | `style:` | 20 | 10m | soft | 1 | | Reduce unnecessary abstractions and complexity |
 
 ## How It Works
 
@@ -82,6 +82,8 @@ Each round has a `gate` setting that controls what happens when tests fail:
 - **hard** (default): Pipeline stops. Use for correctness-critical rounds (tests, concurrency, security).
 - **soft**: Pipeline continues to the next round. Use for best-effort rounds (refactoring, dead code, simplify).
 - **none**: Tests are skipped entirely. Use for rounds that don't affect behavior.
+
+Unrecognized gate values (e.g., a typo like `hardd`) produce a warning and default to `hard`.
 
 ## Retry Loop
 
@@ -127,6 +129,17 @@ overrides:
     review: true
     analyzers: "bandit semgrep"
 ```
+
+### Configuration priority
+
+For numeric fields like `max_budget_usd` and `max_time_minutes`, the priority order is:
+
+1. **Per-round override** (from the `overrides` section in pipeline.yaml) — highest
+2. **Frontmatter** (explicitly set in the round's `.md` file)
+3. **Global config** (top-level `max_budget_usd` / `max_time_minutes` in pipeline.yaml)
+4. **Default** ($5.00 budget, 30 turns, 15 minutes) — lowest
+
+This means a round that explicitly sets `max_budget_usd: 3.00` in its frontmatter won't be silently overwritten by a global `max_budget_usd: 20.00` — the frontmatter value is preserved unless a per-round override is also present.
 
 ## Custom Rounds
 

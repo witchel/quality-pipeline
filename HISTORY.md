@@ -62,3 +62,29 @@ Several improvements to the Python script, all verified against the existing
   `--log-dir` options. Replaced reference to deleted `quality-pipeline.sh`.
   Replaced stale `CONFIG_OVERRIDE_<NAME>_ANALYZERS` reference. Added frontmatter
   field reference table.
+
+---
+
+## 2026-03-05 — Sentinel None for config fields and cleanup robustness
+
+The config override system had a subtle design flaw: `RoundConfig` used concrete
+defaults (e.g., `max_budget_usd: float = 5.00`), which meant there was no way to
+distinguish "the frontmatter explicitly set this to $5" from "the frontmatter
+didn't set this at all." A global `max_budget_usd: 20.00` in pipeline.yaml would
+silently overwrite a frontmatter-explicit `max_budget_usd: 5.00`, since both
+looked the same to the override logic.
+
+Fixed by changing `max_budget_usd`, `max_turns`, and `max_time_minutes` to
+`None`-sentinel fields. A new `_finalize_round_config()` fills in real defaults
+after all overrides are applied. The priority chain is now unambiguous:
+per-round override > frontmatter > global config > default.
+
+`_finalize_round_config` also validates gate values — a typo like `gate: hardd`
+now warns and defaults to `"hard"` instead of silently behaving as hard in some
+code paths and falling through in others.
+
+The `run_round` function was split into a thin wrapper (try/finally to guarantee
+`_cleanup.current_round` is cleared) and `_execute_round` (the body). Previously
+every exit path had to remember to clear `current_round` — five copies of the
+same line, and any exception escaping would skip them all, leaving a confusing
+"Interrupted during round: X" message in the cleanup handler.
