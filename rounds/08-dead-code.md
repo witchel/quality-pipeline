@@ -3,7 +3,8 @@ name: dead-code
 order: 30
 commit_message_prefix: "chore: "
 max_budget_usd: 3.00
-max_turns: 15
+max_turns: 20
+max_time_minutes: 10
 gate: soft
 max_retries: 1
 ---

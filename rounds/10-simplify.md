@@ -3,7 +3,8 @@ name: simplify
 order: 40
 commit_message_prefix: "style: "
 max_budget_usd: 3.00
-max_turns: 15
+max_turns: 20
+max_time_minutes: 10
 gate: soft
 max_retries: 1
 ---

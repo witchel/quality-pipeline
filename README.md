@@ -48,18 +48,18 @@ uv run ~/.claude/plugins/quality-pipeline/scripts/quality_pipeline.py \
 
 ## Built-in Rounds
 
-| Round | Prefix | Budget | Gate | Retries | Review | Description |
-|-------|--------|--------|------|---------|--------|-------------|
-| `audit-tests` | `test:` | $5.00 | hard | 2 | | Audit test quality and fill coverage gaps with substantial, independent tests |
-| `refactor` | `refactor:` | $5.00 | soft | 1 | | Improve naming, structure, and clarity |
-| `concurrency` | `fix:` | $5.00 | hard | 0 | yes | Fix races, lost updates, and find parallelization opportunities |
-| `fault-tolerance` | `fix:` | $5.00 | hard | 0 | yes | Fix non-atomic writes, lost updates, missing fsync, and idempotency bugs |
-| `error-handling` | `fix:` | $5.00 | hard | 1 | | Fix swallowed errors, missing error paths, and inconsistent patterns |
-| `security` | `fix:` | $5.00 | hard | 0 | yes | Fix hardcoded secrets, injection vectors, and insecure defaults |
-| `type-safety` | `refactor:` | $5.00 | soft | 1 | | Add missing type annotations and tighten overly broad types |
-| `dead-code` | `chore:` | $3.00 | soft | 1 | | Remove unused imports, functions, and variables |
-| `dependency-hygiene` | `chore:` | $3.00 | soft | 1 | | Remove unused dependencies and flag deprecated API usage |
-| `simplify` | `style:` | $3.00 | soft | 1 | | Reduce unnecessary abstractions and complexity |
+| Round | Prefix | Time | Gate | Retries | Review | Description |
+|-------|--------|------|------|---------|--------|-------------|
+| `audit-tests` | `test:` | 20m | hard | 2 | | Audit test quality and fill coverage gaps with substantial, independent tests |
+| `refactor` | `refactor:` | 20m | soft | 1 | | Improve naming, structure, and clarity |
+| `concurrency` | `fix:` | 15m | hard | 0 | yes | Fix races, lost updates, and find parallelization opportunities |
+| `fault-tolerance` | `fix:` | 15m | hard | 0 | yes | Fix non-atomic writes, lost updates, missing fsync, and idempotency bugs |
+| `error-handling` | `fix:` | 15m | hard | 1 | | Fix swallowed errors, missing error paths, and inconsistent patterns |
+| `security` | `fix:` | 20m | hard | 0 | yes | Fix hardcoded secrets, injection vectors, and insecure defaults |
+| `type-safety` | `refactor:` | 15m | soft | 1 | | Add missing type annotations and tighten overly broad types |
+| `dead-code` | `chore:` | 10m | soft | 1 | | Remove unused imports, functions, and variables |
+| `dependency-hygiene` | `chore:` | 10m | soft | 1 | | Remove unused dependencies and flag deprecated API usage |
+| `simplify` | `style:` | 10m | soft | 1 | | Reduce unnecessary abstractions and complexity |
 
 ## How It Works
 
@@ -85,7 +85,7 @@ Each round has a `gate` setting that controls what happens when tests fail:
 
 ## Retry Loop
 
-When tests fail after a round, the pipeline can retry by re-invoking Claude with the test output. Set `max_retries` in the round frontmatter (default: 0). Each retry uses half the round's budget and shows Claude the last 100 lines of test output.
+When tests fail after a round, the pipeline can retry by re-invoking Claude with the test output. Set `max_retries` in the round frontmatter (default: 0). Each retry uses half the round's budget/time and shows Claude the last 100 lines of test output.
 
 ## Static Analysis
 
@@ -114,9 +114,11 @@ test_command: "pytest tests/"
 rounds: [audit-tests, refactor, concurrency, fault-tolerance, error-handling, security, type-safety, dead-code, dependency-hygiene, simplify]
 branch_prefix: "quality/"
 max_budget_usd: 20.00
+max_time_minutes: 20
 overrides:
   audit-tests:
     max_budget_usd: 8.00
+    max_time_minutes: 30
     append_prompt: "Use pytest with fixtures"
   dead-code:
     gate: none
@@ -135,7 +137,8 @@ Add a markdown file to `rounds/` with YAML frontmatter:
 name: my-round
 commit_message_prefix: "feat: "
 max_budget_usd: 5.00
-max_turns: 20
+max_turns: 30
+max_time_minutes: 15
 gate: hard
 max_retries: 1
 review: false
@@ -153,8 +156,9 @@ Frontmatter fields (all optional, with backward-compatible defaults):
 |-------|---------|-------------|
 | `name` | `""` | Round identifier (used for config overrides and display) |
 | `commit_message_prefix` | `"chore: "` | Git commit message prefix |
-| `max_budget_usd` | `5.00` | Claude API budget cap |
-| `max_turns` | `20` | Maximum Claude conversation turns |
+| `max_budget_usd` | `5.00` | Claude API budget cap (for pay-per-token users) |
+| `max_turns` | `30` | Maximum Claude conversation turns |
+| `max_time_minutes` | `15` | Wall-clock timeout for the Claude invocation |
 | `gate` | `"hard"` | `hard`, `soft`, or `none` (see Gate Types) |
 | `max_retries` | `0` | Retry attempts on test failure |
 | `review` | `false` | Run a reviewer pass after commit |

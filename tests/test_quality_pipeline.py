@@ -85,6 +85,7 @@ class TestParseFrontmatter:
             "gate: soft\n"
             "max_budget_usd: 3.50\n"
             "max_turns: 15\n"
+            "max_time_minutes: 20\n"
             "max_retries: 2\n"
             "review: true\n"
             "analyzers: bandit semgrep\n"
@@ -97,6 +98,7 @@ class TestParseFrontmatter:
         assert rc.gate == "soft"
         assert rc.max_budget_usd == 3.50
         assert rc.max_turns == 15
+        assert rc.max_time_minutes == 20
         assert rc.max_retries == 2
         assert rc.review is True
         assert rc.analyzers == "bandit semgrep"
@@ -109,6 +111,7 @@ class TestParseFrontmatter:
         assert rc.name == ""
         assert rc.gate == "hard"
         assert rc.max_budget_usd == 5.00
+        assert rc.max_time_minutes == 15
 
     def test_defaults(self, tmp_path):
         f = tmp_path / "round.md"
@@ -117,7 +120,8 @@ class TestParseFrontmatter:
         assert rc.name == "minimal"
         assert rc.gate == "hard"
         assert rc.max_budget_usd == 5.00
-        assert rc.max_turns == 20
+        assert rc.max_turns == 30
+        assert rc.max_time_minutes == 15
         assert rc.max_retries == 0
         assert rc.review is None
         assert rc.analyzers == ""
@@ -228,6 +232,7 @@ class TestApplyConfigOverrides:
         cfg = qp.PipelineConfig(overrides={
             "test": {
                 "max_budget_usd": 10.0,
+                "max_time_minutes": 25,
                 "gate": "none",
                 "max_retries": 5,
                 "review": True,
@@ -236,10 +241,32 @@ class TestApplyConfigOverrides:
         })
         result = qp.apply_config_overrides(rc, cfg)
         assert result.max_budget_usd == 10.0
+        assert result.max_time_minutes == 25
         assert result.gate == "none"
         assert result.max_retries == 5
         assert result.review is True
         assert result.analyzers == "mypy pyright"
+
+    def test_global_budget_applied(self):
+        rc = qp.RoundConfig(name="test")
+        cfg = qp.PipelineConfig(max_budget_usd=10.0)
+        result = qp.apply_config_overrides(rc, cfg)
+        assert result.max_budget_usd == 10.0
+
+    def test_global_time_applied(self):
+        rc = qp.RoundConfig(name="test")
+        cfg = qp.PipelineConfig(max_time_minutes=25)
+        result = qp.apply_config_overrides(rc, cfg)
+        assert result.max_time_minutes == 25
+
+    def test_per_round_override_beats_global(self):
+        rc = qp.RoundConfig(name="test")
+        cfg = qp.PipelineConfig(
+            max_time_minutes=25,
+            overrides={"test": {"max_time_minutes": 30}},
+        )
+        result = qp.apply_config_overrides(rc, cfg)
+        assert result.max_time_minutes == 30
 
     def test_review_string_override(self):
         rc = qp.RoundConfig(name="test")
@@ -1144,6 +1171,14 @@ class TestRunClaude:
         qp.run_claude("prompt", "ctx", 3.50, 10, log_file)
         assert "3.50" in captured_cmd
         assert "10" in captured_cmd
+
+    def test_timeout_returns_negative_one(self, tmp_path, monkeypatch):
+        log_file = tmp_path / "claude.log"
+        def mock_run(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd="claude", timeout=60)
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        code = qp.run_claude("prompt", "ctx", 5.0, 20, log_file, timeout_minutes=1)
+        assert code == -1
 
 
 # ---------------------------------------------------------------------------

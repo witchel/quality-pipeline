@@ -3,7 +3,8 @@ name: security
 order: 45
 commit_message_prefix: "fix: "
 max_budget_usd: 5.00
-max_turns: 20
+max_turns: 40
+max_time_minutes: 20
 gate: hard
 max_retries: 0
 review: true

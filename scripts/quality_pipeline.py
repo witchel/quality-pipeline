@@ -70,7 +70,8 @@ class RoundConfig:
     name: str = ""
     commit_message_prefix: str = "chore: "
     max_budget_usd: float = 5.00
-    max_turns: int = 20
+    max_turns: int = 30
+    max_time_minutes: int = 15
     gate: str = "hard"
     max_retries: int = 0
     review: bool | None = None  # None = not set (defaults to False)
@@ -83,6 +84,7 @@ class PipelineConfig:
     rounds: list[str] = field(default_factory=list)
     branch_prefix: str = ""
     max_budget_usd: float | None = None
+    max_time_minutes: int | None = None
     overrides: dict[str, dict] = field(default_factory=dict)
 
 
@@ -627,7 +629,8 @@ def parse_frontmatter(path: Path) -> RoundConfig:
         name=str(data.get("name", "")),
         commit_message_prefix=str(data.get("commit_message_prefix", "chore: ")),
         max_budget_usd=float(data.get("max_budget_usd", 5.00)),
-        max_turns=int(data.get("max_turns", 20)),
+        max_turns=int(data.get("max_turns", 30)),
+        max_time_minutes=int(data.get("max_time_minutes", 15)),
         gate=str(data.get("gate", "hard")),
         max_retries=int(data.get("max_retries", 0)),
         review=review,
@@ -657,11 +660,13 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
         if isinstance(ov, dict):
             overrides[name] = ov
 
+    raw_time = data.get("max_time_minutes")
     return PipelineConfig(
         test_command=str(data.get("test_command", "")),
         rounds=list(data.get("rounds", [])),
         branch_prefix=str(data.get("branch_prefix", "")),
         max_budget_usd=data.get("max_budget_usd"),
+        max_time_minutes=int(raw_time) if raw_time is not None else None,
         overrides=overrides,
     )
 
@@ -679,14 +684,29 @@ def _find_override(name: str, config: PipelineConfig) -> dict:
 
 
 def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConfig:
-    """Apply per-round config overrides, returning a new RoundConfig."""
+    """Apply global config defaults then per-round overrides, returning a new RoundConfig."""
     ov = _find_override(rc.name, config)
-    if not ov:
+
+    # Nothing to apply — no globals set and no per-round overrides
+    if not ov and config.max_budget_usd is None and config.max_time_minutes is None:
         return rc
 
     rc = replace(rc)
+
+    # Global defaults (overridden by per-round frontmatter only if the
+    # frontmatter explicitly set the field — we can't distinguish "explicitly
+    # set to the default" from "not set", so globals win only when the round
+    # file left it at the dataclass default).
+    if config.max_budget_usd is not None and "max_budget_usd" not in ov:
+        rc.max_budget_usd = config.max_budget_usd
+    if config.max_time_minutes is not None and "max_time_minutes" not in ov:
+        rc.max_time_minutes = config.max_time_minutes
+
+    # Per-round overrides take highest priority
     if "max_budget_usd" in ov:
         rc.max_budget_usd = float(ov["max_budget_usd"])
+    if "max_time_minutes" in ov:
+        rc.max_time_minutes = int(ov["max_time_minutes"])
     if "gate" in ov:
         rc.gate = str(ov["gate"])
     if "max_retries" in ov:
@@ -887,8 +907,13 @@ def run_claude(
     budget: float,
     turns: int,
     log_file: Path,
+    timeout_minutes: int = 0,
 ) -> int:
-    """Invoke claude -p and capture output to log. Returns exit code."""
+    """Invoke claude -p and capture output to log. Returns exit code.
+
+    If *timeout_minutes* > 0, the subprocess is killed after that many minutes
+    and a non-zero exit code (``-1``) is returned.
+    """
     cmd = [
         "claude", "-p", prompt,
         "--append-system-prompt", system_ctx,
@@ -897,10 +922,19 @@ def run_claude(
         "--max-turns", str(turns),
         "--output-format", "json",
     ]
+    timeout_secs = timeout_minutes * 60 if timeout_minutes > 0 else None
     with log_file.open("w") as fout:
-        result = subprocess.run(
-            cmd, stdout=fout, stderr=subprocess.STDOUT, check=False
-        )
+        try:
+            result = subprocess.run(
+                cmd, stdout=fout, stderr=subprocess.STDOUT, check=False,
+                timeout=timeout_secs,
+            )
+        except subprocess.TimeoutExpired:
+            C.err(
+                f"Claude timed out after {timeout_minutes} minutes — "
+                f"increase max_time_minutes if the round needs more time"
+            )
+            return -1
     return result.returncode
 
 
@@ -943,7 +977,15 @@ def run_reviewer(
 
     # Get diff (check=False means git() won't raise on non-zero exit)
     diff_result = git("diff", pre_sha, "HEAD", check=False)
-    diff_content = diff_result.stdout[:8000] if diff_result.stdout else ""
+    diff_raw = diff_result.stdout or ""
+    max_diff = 8000
+    if len(diff_raw) > max_diff:
+        diff_content = diff_raw[:max_diff] + (
+            f"\n\n[... truncated {len(diff_raw) - max_diff} chars — "
+            f"review may miss issues in the remainder ...]"
+        )
+    else:
+        diff_content = diff_raw
 
     if not diff_content:
         C.warn("No diff to review — skipping reviewer")
@@ -987,7 +1029,8 @@ def _print_round_header(round_num: int, total: int, rc: RoundConfig) -> None:
     C.log("\u2501" * 60)
     C.log(f"{C.BOLD}Round {round_num}/{total}: {rc.name}{C.NC}")
     C.log(
-        f"Budget: ${rc.max_budget_usd:.2f} | Max turns: {rc.max_turns} | "
+        f"Budget: ${rc.max_budget_usd:.2f} | Turns: {rc.max_turns} | "
+        f"Time: {rc.max_time_minutes}m | "
         f"Gate: {gate_label(rc.gate)} | Retries: {rc.max_retries}"
     )
     C.log("\u2501" * 60)
@@ -1051,9 +1094,12 @@ def run_round(
     _cleanup.monitor = monitor
 
     # Run claude
-    C.log("Invoking claude...")
+    C.log(f"Invoking claude (timeout {rc.max_time_minutes}m)...")
     claude_log = log_dir / f"round-{round_num}.log"
-    claude_exit = run_claude(prompt, system_context, rc.max_budget_usd, rc.max_turns, claude_log)
+    claude_exit = run_claude(
+        prompt, system_context, rc.max_budget_usd, rc.max_turns, claude_log,
+        timeout_minutes=rc.max_time_minutes,
+    )
     C.log(f"Claude finished (exit {claude_exit})")
 
     monitor.stop()
@@ -1070,6 +1116,7 @@ def run_round(
     if claude_exit != 0:
         C.err(f"Claude exited with code {claude_exit} in round {round_num} ({rc.name})")
         _finish("failed")
+        _cleanup.current_round = ""
         if rc.gate == "soft":
             return RoundOutcome.SOFT_FAILED
         return RoundOutcome.HARD_FAILED
@@ -1134,7 +1181,10 @@ def run_round(
 
         retry_budget = max(1.0, rc.max_budget_usd / 2)
         retry_log = log_dir / f"round-{round_num}-retry-{attempt}.log"
-        retry_exit = run_claude(retry_prompt, system_context, retry_budget, rc.max_turns, retry_log)
+        retry_exit = run_claude(
+            retry_prompt, system_context, retry_budget, rc.max_turns, retry_log,
+            timeout_minutes=max(5, rc.max_time_minutes // 2),
+        )
         C.log(f"Retry claude finished (exit {retry_exit})")
 
         # Re-stage changes
@@ -1345,8 +1395,8 @@ def pipeline(
         review_str = str(rc.review).lower() if rc.review is not None else "false"
         analyzers_str = rc.analyzers or "none"
         C.log(
-            f"  {n}. {rc.name} [${rc.max_budget_usd:.2f}] gate={rc.gate} "
-            f"retries={rc.max_retries} review={review_str} "
+            f"  {n}. {rc.name} [${rc.max_budget_usd:.2f}, {rc.max_time_minutes}m] "
+            f"gate={rc.gate} retries={rc.max_retries} review={review_str} "
             f"analyzers={analyzers_str}{marker}"
         )
     print()

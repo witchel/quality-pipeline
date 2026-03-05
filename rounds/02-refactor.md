@@ -3,7 +3,8 @@ name: refactor
 order: 20
 commit_message_prefix: "refactor: "
 max_budget_usd: 5.00
-max_turns: 20
+max_turns: 40
+max_time_minutes: 20
 gate: soft
 max_retries: 1
 ---

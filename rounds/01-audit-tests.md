@@ -3,7 +3,8 @@ name: audit-tests
 order: 10
 commit_message_prefix: "test: "
 max_budget_usd: 5.00
-max_turns: 30
+max_turns: 40
+max_time_minutes: 20
 gate: hard
 max_retries: 2
 ---
