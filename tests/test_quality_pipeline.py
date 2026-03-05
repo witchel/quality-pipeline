@@ -110,18 +110,19 @@ class TestParseFrontmatter:
         rc = qp.parse_frontmatter(f)
         assert rc.name == ""
         assert rc.gate == "hard"
-        assert rc.max_budget_usd == 5.00
-        assert rc.max_time_minutes == 15
+        assert rc.max_budget_usd is None
+        assert rc.max_time_minutes is None
 
     def test_defaults(self, tmp_path):
+        """Unset fields are None; finalization fills in defaults."""
         f = tmp_path / "round.md"
         f.write_text("---\nname: minimal\n---\nPrompt here.\n")
         rc = qp.parse_frontmatter(f)
         assert rc.name == "minimal"
         assert rc.gate == "hard"
-        assert rc.max_budget_usd == 5.00
-        assert rc.max_turns == 30
-        assert rc.max_time_minutes == 15
+        assert rc.max_budget_usd is None
+        assert rc.max_turns is None
+        assert rc.max_time_minutes is None
         assert rc.max_retries == 0
         assert rc.review is None
         assert rc.analyzers == ""
@@ -279,6 +280,49 @@ class TestApplyConfigOverrides:
         cfg = qp.PipelineConfig(overrides={"dead_code": {"gate": "none"}})
         result = qp.apply_config_overrides(rc, cfg)
         assert result.gate == "none"
+
+    def test_frontmatter_explicit_beats_global(self):
+        """Frontmatter-set value should not be overwritten by global config."""
+        rc = qp.RoundConfig(name="test", max_budget_usd=3.0)
+        cfg = qp.PipelineConfig(max_budget_usd=10.0)
+        result = qp.apply_config_overrides(rc, cfg)
+        assert result.max_budget_usd == 3.0
+
+
+# ---------------------------------------------------------------------------
+# _finalize_round_config
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeRoundConfig:
+    def test_fills_defaults(self):
+        rc = qp.RoundConfig(name="test")
+        result = qp._finalize_round_config(rc)
+        assert result.max_budget_usd == qp._DEFAULT_MAX_BUDGET_USD
+        assert result.max_turns == qp._DEFAULT_MAX_TURNS
+        assert result.max_time_minutes == qp._DEFAULT_MAX_TIME_MINUTES
+
+    def test_preserves_explicit_values(self):
+        rc = qp.RoundConfig(
+            name="test", max_budget_usd=3.0, max_turns=10, max_time_minutes=5
+        )
+        result = qp._finalize_round_config(rc)
+        assert result.max_budget_usd == 3.0
+        assert result.max_turns == 10
+        assert result.max_time_minutes == 5
+
+    def test_invalid_gate_warns_and_defaults(self, capsys):
+        rc = qp.RoundConfig(name="test", gate="hardd")
+        result = qp._finalize_round_config(rc)
+        assert result.gate == "hard"
+        captured = capsys.readouterr()
+        assert "Unknown gate" in captured.out
+
+    def test_valid_gates_unchanged(self):
+        for gate in ("hard", "soft", "none"):
+            rc = qp.RoundConfig(name="test", gate=gate)
+            result = qp._finalize_round_config(rc)
+            assert result.gate == gate
 
 
 # ---------------------------------------------------------------------------
@@ -940,7 +984,8 @@ class TestRunStaticAnalysis:
             lambda name, args, proj, prereqs=None: "x" * 5000,
         )
         result = qp.run_static_analysis("security", Path("."))
-        assert len(result) <= qp.MAX_ANALYSIS_OUTPUT
+        assert result.endswith("\n[... truncated]")
+        assert len(result) <= qp.MAX_ANALYSIS_OUTPUT + len("\n[... truncated]")
 
     def test_unknown_analyzer_skipped(self, monkeypatch):
         monkeypatch.setattr(

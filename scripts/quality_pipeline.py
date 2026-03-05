@@ -60,6 +60,12 @@ DEFAULT_ANALYZERS: dict[str, str] = {
 
 MAX_ANALYSIS_OUTPUT = 4000
 
+VALID_GATES = {"hard", "soft", "none"}
+
+_DEFAULT_MAX_BUDGET_USD = 5.00
+_DEFAULT_MAX_TURNS = 30
+_DEFAULT_MAX_TIME_MINUTES = 15
+
 # ---------------------------------------------------------------------------
 # Dataclasses & enums
 # ---------------------------------------------------------------------------
@@ -69,9 +75,9 @@ MAX_ANALYSIS_OUTPUT = 4000
 class RoundConfig:
     name: str = ""
     commit_message_prefix: str = "chore: "
-    max_budget_usd: float = 5.00
-    max_turns: int = 30
-    max_time_minutes: int = 15
+    max_budget_usd: float | None = None
+    max_turns: int | None = None
+    max_time_minutes: int | None = None
     gate: str = "hard"
     max_retries: int = 0
     review: bool | None = None  # None = not set (defaults to False)
@@ -432,7 +438,7 @@ def detect_test_command(project_dir: Path) -> str | None:
         text = claude_md.read_text(errors="replace")
         # Explicit "test command:" or "run tests:" line
         m = re.search(
-            r"^\s*(?:test command|run tests|testing):?\s+(.+)",
+            r"^\s*(?:test command|run tests):?\s+(.+)",
             text, re.IGNORECASE | re.MULTILINE,
         )
         if m:
@@ -593,7 +599,11 @@ def run_static_analysis(
             output_parts.append(f"### {analyzer}\n{result}")
 
     combined = "\n\n".join(output_parts)
-    return combined[:MAX_ANALYSIS_OUTPUT] if combined else ""
+    if not combined:
+        return ""
+    if len(combined) > MAX_ANALYSIS_OUTPUT:
+        return combined[:MAX_ANALYSIS_OUTPUT] + "\n[... truncated]"
+    return combined
 
 
 # ---------------------------------------------------------------------------
@@ -628,9 +638,9 @@ def parse_frontmatter(path: Path) -> RoundConfig:
     return RoundConfig(
         name=str(data.get("name", "")),
         commit_message_prefix=str(data.get("commit_message_prefix", "chore: ")),
-        max_budget_usd=float(data.get("max_budget_usd", 5.00)),
-        max_turns=int(data.get("max_turns", 30)),
-        max_time_minutes=int(data.get("max_time_minutes", 15)),
+        max_budget_usd=float(data["max_budget_usd"]) if "max_budget_usd" in data else None,
+        max_turns=int(data["max_turns"]) if "max_turns" in data else None,
+        max_time_minutes=int(data["max_time_minutes"]) if "max_time_minutes" in data else None,
         gate=str(data.get("gate", "hard")),
         max_retries=int(data.get("max_retries", 0)),
         review=review,
@@ -683,30 +693,45 @@ def _find_override(name: str, config: PipelineConfig) -> dict:
     return {}
 
 
+def _finalize_round_config(rc: RoundConfig) -> RoundConfig:
+    """Fill in defaults for unset fields and validate gate value."""
+    changes: dict[str, object] = {}
+    if rc.max_budget_usd is None:
+        changes["max_budget_usd"] = _DEFAULT_MAX_BUDGET_USD
+    if rc.max_turns is None:
+        changes["max_turns"] = _DEFAULT_MAX_TURNS
+    if rc.max_time_minutes is None:
+        changes["max_time_minutes"] = _DEFAULT_MAX_TIME_MINUTES
+    if rc.gate not in VALID_GATES:
+        C.warn(f"Unknown gate '{rc.gate}' for round '{rc.name}' — defaulting to 'hard'")
+        changes["gate"] = "hard"
+    return replace(rc, **changes) if changes else rc
+
+
 def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConfig:
-    """Apply global config defaults then per-round overrides, returning a new RoundConfig."""
+    """Apply per-round overrides then global defaults, returning a finalized RoundConfig.
+
+    Priority (highest first): per-round override > frontmatter > global config > default.
+    """
     ov = _find_override(rc.name, config)
 
     # Nothing to apply — no globals set and no per-round overrides
     if not ov and config.max_budget_usd is None and config.max_time_minutes is None:
-        return rc
+        return _finalize_round_config(rc)
 
     rc = replace(rc)
 
-    # Global defaults (overridden by per-round frontmatter only if the
-    # frontmatter explicitly set the field — we can't distinguish "explicitly
-    # set to the default" from "not set", so globals win only when the round
-    # file left it at the dataclass default).
-    if config.max_budget_usd is not None and "max_budget_usd" not in ov:
-        rc.max_budget_usd = config.max_budget_usd
-    if config.max_time_minutes is not None and "max_time_minutes" not in ov:
-        rc.max_time_minutes = config.max_time_minutes
-
-    # Per-round overrides take highest priority
+    # Per-round overrides (highest priority), then global config for unset fields
     if "max_budget_usd" in ov:
         rc.max_budget_usd = float(ov["max_budget_usd"])
+    elif rc.max_budget_usd is None and config.max_budget_usd is not None:
+        rc.max_budget_usd = config.max_budget_usd
+
     if "max_time_minutes" in ov:
         rc.max_time_minutes = int(ov["max_time_minutes"])
+    elif rc.max_time_minutes is None and config.max_time_minutes is not None:
+        rc.max_time_minutes = config.max_time_minutes
+
     if "gate" in ov:
         rc.gate = str(ov["gate"])
     if "max_retries" in ov:
@@ -715,7 +740,7 @@ def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConf
         rc.review = _parse_review_bool(ov["review"])
     if "analyzers" in ov:
         rc.analyzers = str(ov["analyzers"])
-    return rc
+    return _finalize_round_config(rc)
 
 
 def apply_config_prompt_append(rc_name: str, prompt: str, config: PipelineConfig) -> str:
@@ -1053,7 +1078,29 @@ def run_round(
     rc = parse_frontmatter(round_file)
     rc = apply_config_overrides(rc, config)
     _cleanup.current_round = rc.name
+    try:
+        return _execute_round(
+            round_file, round_num, total_rounds, test_cmd, config,
+            review_flag, log_dir, gpu_type, rc, round_start, pre_sha,
+        )
+    finally:
+        _cleanup.current_round = ""
 
+
+def _execute_round(
+    round_file: Path,
+    round_num: int,
+    total_rounds: int,
+    test_cmd: str,
+    config: PipelineConfig,
+    review_flag: bool | None,
+    log_dir: Path,
+    gpu_type: str,
+    rc: RoundConfig,
+    round_start: float,
+    pre_sha: str,
+) -> RoundOutcome:
+    """Inner round execution: prompt, Claude, tests, commit."""
     prompt = get_round_prompt(round_file)
     prompt = apply_config_prompt_append(rc.name, prompt, config)
 
@@ -1116,7 +1163,6 @@ def run_round(
     if claude_exit != 0:
         C.err(f"Claude exited with code {claude_exit} in round {round_num} ({rc.name})")
         _finish("failed")
-        _cleanup.current_round = ""
         if rc.gate == "soft":
             return RoundOutcome.SOFT_FAILED
         return RoundOutcome.HARD_FAILED
@@ -1131,7 +1177,6 @@ def run_round(
     if not has_changes:
         C.warn(f"No changes made in round {round_num} ({rc.name}) — skipping commit")
         _finish("no changes")
-        _cleanup.current_round = ""
         return RoundOutcome.NO_CHANGES
 
     # Stage changes
@@ -1144,7 +1189,6 @@ def run_round(
         C.ok(f"Committed: {commit_msg} (gate=none, tests skipped)")
         run_reviewer(round_num, rc, pre_sha, log_dir, review_flag)
         _finish("passed")
-        _cleanup.current_round = ""
         return RoundOutcome.PASSED
 
     # --- Test + retry loop ---
@@ -1198,7 +1242,6 @@ def run_round(
         C.err("Rolling back changes from this round...")
         git_rollback_round(pre_untracked)
         _finish("tests failed")
-        _cleanup.current_round = ""
         if rc.gate == "soft":
             return RoundOutcome.SOFT_FAILED
         return RoundOutcome.HARD_FAILED
@@ -1212,7 +1255,6 @@ def run_round(
     run_reviewer(round_num, rc, pre_sha, log_dir, review_flag)
 
     _finish("passed")
-    _cleanup.current_round = ""
     return RoundOutcome.PASSED
 
 
@@ -1452,7 +1494,6 @@ def pipeline(
         outcome = run_round(
             rf, n, total, effective_test_cmd, config, review_flag, log_dir, gpu_type
         )
-        _cleanup.current_round = ""
 
         results.append(RoundResult(rc.name, outcome))
 
