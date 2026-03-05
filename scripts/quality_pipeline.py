@@ -926,6 +926,14 @@ def run_tests_with_tee(cmd: str, output_file: Path) -> int:
         raise
 
 
+def _claude_env() -> dict[str, str]:
+    """Build an environment for spawning claude -p without recursive-run detection."""
+    env = os.environ.copy()
+    for var in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+        env.pop(var, None)
+    return env
+
+
 def run_claude(
     prompt: str,
     system_ctx: str,
@@ -947,12 +955,13 @@ def run_claude(
         "--max-turns", str(turns),
         "--output-format", "json",
     ]
+    env = _claude_env()
     timeout_secs = timeout_minutes * 60 if timeout_minutes > 0 else None
     with log_file.open("w") as fout:
         try:
             result = subprocess.run(
                 cmd, stdout=fout, stderr=subprocess.STDOUT, check=False,
-                timeout=timeout_secs,
+                timeout=timeout_secs, env=env,
             )
         except subprocess.TimeoutExpired:
             C.err(
@@ -1033,7 +1042,9 @@ def run_reviewer(
         "--output-format", "json",
     ]
     with review_output.open("w") as fout:
-        result = subprocess.run(cmd, stdout=fout, stderr=subprocess.STDOUT, check=False)
+        result = subprocess.run(
+            cmd, stdout=fout, stderr=subprocess.STDOUT, check=False, env=_claude_env(),
+        )
     C.log(f"Reviewer claude finished (exit {result.returncode})")
 
     verdict = _parse_verdict(review_output.read_text())

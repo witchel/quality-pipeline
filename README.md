@@ -30,6 +30,8 @@ uv run ~/.claude/plugins/quality-pipeline/scripts/quality_pipeline.py \
     --test-command "npm test"
 ```
 
+When invoked from within a Claude Code session (interactive or via the `/quality-pipeline` command), the pipeline automatically unsets `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` before spawning `claude -p` subprocesses, so they don't fail with a recursive-run detection error.
+
 ## Options
 
 | Option | Description |
