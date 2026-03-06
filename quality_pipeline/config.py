@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from glob import escape as _glob_escape
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -68,7 +69,7 @@ class PipelineConfig:
     branch_prefix: str = ""
     max_budget_usd: float | None = None
     max_time_minutes: int | None = None
-    overrides: dict[str, dict] = field(default_factory=dict)
+    overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class RoundOutcome(Enum):
@@ -90,7 +91,7 @@ class RoundResult:
 # ---------------------------------------------------------------------------
 
 
-def _parse_review_bool(val: object) -> bool | None:
+def _parse_review_bool(val: bool | str | None) -> bool | None:
     """Convert a review field value to bool | None."""
     if isinstance(val, bool):
         return val
@@ -170,7 +171,7 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
         return PipelineConfig()
 
 
-def _find_override(name: str, config: PipelineConfig) -> dict:
+def _find_override(name: str, config: PipelineConfig) -> dict[str, Any]:
     """Look up per-round override dict, normalizing dashes/underscores."""
     ov = config.overrides.get(name)
     if ov is not None:
@@ -184,7 +185,7 @@ def _find_override(name: str, config: PipelineConfig) -> dict:
 
 def _finalize_round_config(rc: RoundConfig) -> RoundConfig:
     """Fill in defaults for unset fields and validate gate value."""
-    changes: dict[str, object] = {}
+    changes: dict[str, float | int | bool | str] = {}
     if rc.max_budget_usd is None:
         changes["max_budget_usd"] = _DEFAULT_MAX_BUDGET_USD
     if rc.max_turns is None:

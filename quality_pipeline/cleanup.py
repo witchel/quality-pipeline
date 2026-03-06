@@ -16,6 +16,8 @@ from .output import C
 from .config import ENV_FILES
 
 if TYPE_CHECKING:
+    import types
+
     from .monitoring import ResourceMonitor
 
 
@@ -132,5 +134,5 @@ class PipelineCleanup:
 _cleanup = PipelineCleanup()
 
 
-def _handle_signal(signum: int, _frame: object) -> None:  # noqa: ARG001
+def _handle_signal(signum: int, _frame: types.FrameType | None) -> None:
     sys.exit(128 + signum)

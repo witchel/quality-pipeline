@@ -22,7 +22,7 @@ REVIEWER_TIMEOUT_MINUTES = 10
 REVIEWER_MAX_DIFF_CHARS = 8000
 
 
-def _kill_process_group(proc: subprocess.Popen, graceful_wait: float = 2.0) -> None:
+def _kill_process_group(proc: subprocess.Popen[str], graceful_wait: float = 2.0) -> None:
     """Kill a process and its entire process group.
 
     Requires the process to have been started with ``start_new_session=True``

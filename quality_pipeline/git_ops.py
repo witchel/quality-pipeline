@@ -12,7 +12,7 @@ from .output import C
 from .config import ENV_FILES
 
 
-def git(*args: str, capture: bool = True, check: bool = True) -> subprocess.CompletedProcess:
+def git(*args: str, capture: bool = True, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run a git command, returning CompletedProcess."""
     return subprocess.run(
         ["git", *args],
