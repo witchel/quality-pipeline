@@ -114,18 +114,22 @@ def parse_frontmatter(path: Path) -> RoundConfig:
 
     review = _parse_review_bool(data.get("review"))
 
-    return RoundConfig(
-        name=str(data.get("name", "")),
-        commit_message_prefix=str(data.get("commit_message_prefix", "chore: ")),
-        max_budget_usd=float(data["max_budget_usd"]) if "max_budget_usd" in data else None,
-        max_turns=int(data["max_turns"]) if "max_turns" in data else None,
-        max_time_minutes=int(data["max_time_minutes"]) if "max_time_minutes" in data else None,
-        gate=str(data.get("gate", "hard")),
-        max_retries=int(data.get("max_retries", 0)),
-        review=review,
-        review_gate=str(data.get("review_gate", "none")),
-        analyzers=str(data.get("analyzers", "")),
-    )
+    try:
+        return RoundConfig(
+            name=str(data.get("name", "")),
+            commit_message_prefix=str(data.get("commit_message_prefix", "chore: ")),
+            max_budget_usd=float(data["max_budget_usd"]) if "max_budget_usd" in data else None,
+            max_turns=int(data["max_turns"]) if "max_turns" in data else None,
+            max_time_minutes=int(data["max_time_minutes"]) if "max_time_minutes" in data else None,
+            gate=str(data.get("gate", "hard")),
+            max_retries=int(data.get("max_retries", 0)),
+            review=review,
+            review_gate=str(data.get("review_gate", "none")),
+            analyzers=str(data.get("analyzers", "")),
+        )
+    except (ValueError, TypeError) as e:
+        C.warn(f"Invalid value in frontmatter of {path.name}: {e}")
+        return RoundConfig()
 
 
 def get_round_prompt(path: Path) -> str:
@@ -151,14 +155,18 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
             overrides[name] = ov
 
     raw_time = data.get("max_time_minutes")
-    return PipelineConfig(
-        test_command=str(data.get("test_command", "")),
-        rounds=list(data.get("rounds", [])),
-        branch_prefix=str(data.get("branch_prefix", "")),
-        max_budget_usd=float(data["max_budget_usd"]) if "max_budget_usd" in data else None,
-        max_time_minutes=int(raw_time) if raw_time is not None else None,
-        overrides=overrides,
-    )
+    try:
+        return PipelineConfig(
+            test_command=str(data.get("test_command", "")),
+            rounds=list(data.get("rounds", [])),
+            branch_prefix=str(data.get("branch_prefix", "")),
+            max_budget_usd=float(data["max_budget_usd"]) if "max_budget_usd" in data else None,
+            max_time_minutes=int(raw_time) if raw_time is not None else None,
+            overrides=overrides,
+        )
+    except (ValueError, TypeError) as e:
+        C.warn(f"Invalid value in pipeline config: {e}")
+        return PipelineConfig()
 
 
 def _find_override(name: str, config: PipelineConfig) -> dict:

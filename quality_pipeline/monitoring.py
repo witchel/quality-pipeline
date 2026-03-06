@@ -78,7 +78,7 @@ def _get_memory_darwin() -> str:
         if mem_total > 0:
             pct = used_mb * 100 // mem_total
             return f"{used_mb}/{mem_total} MB ({pct}%)"
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         pass
     return "?"
 
@@ -102,7 +102,7 @@ def _get_memory_linux() -> str:
                 f"{used // 1024}/{total // 1024} MB "
                 f"({used * 100 // total}%)"
             )
-    except Exception:
+    except (OSError, ValueError):
         pass
     return "?"
 
@@ -138,7 +138,7 @@ def _get_gpu_nvidia() -> str:
                 parts.append(f"GPU{idx}: {util}% VRAM {mem_u}/{mem_t} MB")
         if any_active:
             return ", ".join(parts)
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         pass
     return ""
 
@@ -153,7 +153,7 @@ def _get_gpu_rocm() -> str:
         m = re.search(r"(\d+)\s*%", out)
         if m and int(m.group(1)) > 0:
             return f"GPU: {m.group(1)}%"
-    except Exception:
+    except (subprocess.SubprocessError, OSError, ValueError):
         pass
     return ""
 

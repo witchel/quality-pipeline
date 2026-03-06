@@ -433,7 +433,7 @@ def pipeline(
                 for wt in stale:
                     C.warn(f"  {wt}")
                 C.warn("If stale, clean up with: git worktree remove <path>")
-        except Exception:
+        except (subprocess.CalledProcessError, OSError):
             pass
 
         wt_dir, orig_dir = setup_worktree(branch_name, symlink_dirs)

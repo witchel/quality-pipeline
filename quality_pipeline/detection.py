@@ -45,7 +45,7 @@ def detect_test_command(project_dir: Path) -> str | None:
         try:
             if re.search(r"^test\s*:", makefile.read_text(), re.MULTILINE):
                 return "make test"
-        except Exception:
+        except OSError:
             pass
 
     # 3. package.json with test script
@@ -76,7 +76,7 @@ def detect_test_command(project_dir: Path) -> str | None:
             content = pyproject.read_text()
             if re.search(r"\[tool\.pytest", content) or "pytest" in content:
                 return "uv run pytest" if has_uv_lock else "pytest"
-        except Exception:
+        except OSError:
             pass
 
     setup_cfg = project_dir / "setup.cfg"
@@ -84,7 +84,7 @@ def detect_test_command(project_dir: Path) -> str | None:
         try:
             if "[tool:pytest]" in setup_cfg.read_text():
                 return "uv run pytest" if has_uv_lock else "pytest"
-        except Exception:
+        except OSError:
             pass
 
     if (project_dir / "tests").is_dir() or (project_dir / "test").is_dir():

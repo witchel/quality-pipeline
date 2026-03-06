@@ -131,9 +131,14 @@ def git_acquire_lock(dry_run: bool) -> Path | None:
     except FileExistsError:
         if _is_lock_stale(lock_path):
             C.warn("Stale pipeline lock detected — reclaiming")
-            pid_file.unlink(missing_ok=True)
-            lock_path.rmdir()
-            lock_path.mkdir()
+            try:
+                pid_file.unlink(missing_ok=True)
+                lock_path.rmdir()
+                lock_path.mkdir()
+            except OSError as e:
+                C.err(f"Failed to reclaim stale lock: {e}")
+                C.err(f"Manual cleanup: rm -rf '{lock_path}' '{pid_file}'")
+                sys.exit(1)
         else:
             C.err("Another pipeline is running in this repository.")
             C.err(f"If stale, remove: rmdir '{lock_path}'")
