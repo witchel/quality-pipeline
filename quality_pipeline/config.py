@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from glob import escape as _glob_escape
 from pathlib import Path
 
 import yaml
@@ -270,8 +271,9 @@ def resolve_round_file(name: str) -> Path | None:
         if rc.name == name:
             return f
 
-    # Try filename pattern matching
-    for pattern in [f"*-{name}.md", f"*{name}*.md"]:
+    # Try filename pattern matching (escape glob chars in user input)
+    escaped = _glob_escape(name)
+    for pattern in [f"*-{escaped}.md", f"*{escaped}*.md"]:
         matches = list(ROUNDS_DIR.glob(pattern))
         if matches:
             return matches[0]

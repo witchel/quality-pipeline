@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -65,7 +66,7 @@ def run_tests_with_tee(
     env["PYTHONUNBUFFERED"] = "1"  # covers pytest and most Python runners
     for stdbuf in ("stdbuf", "gstdbuf"):
         if shutil.which(stdbuf):
-            cmd = f"{stdbuf} -oL {cmd}"
+            cmd = f"{shlex.quote(stdbuf)} -oL {cmd}"
             break
 
     def _kill_on_timeout() -> None:
