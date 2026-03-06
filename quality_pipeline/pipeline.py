@@ -43,6 +43,10 @@ from .git_ops import (
 from .process import run_claude, run_reviewer, run_tests_with_tee
 from .cleanup import _cleanup
 
+_MIN_TEST_TIMEOUT_SECS = 60
+_TEST_FAILURE_TAIL_LINES = 100
+_MIN_RETRY_BUDGET_USD = 1.0
+
 
 def _remaining_seconds(round_start: float, max_minutes: int) -> int:
     """Seconds remaining in the round's time budget."""
@@ -220,7 +224,7 @@ def _execute_round(
     tests_passed = False
 
     while True:
-        test_remaining = max(60, _remaining_seconds(round_start, rc.max_time_minutes))
+        test_remaining = max(_MIN_TEST_TIMEOUT_SECS, _remaining_seconds(round_start, rc.max_time_minutes))
         C.log(f"Running tests: {test_cmd}")
         test_exit = run_tests_with_tee(
             test_cmd, test_output_file, timeout_seconds=test_remaining,
@@ -238,7 +242,7 @@ def _execute_round(
             break
 
         remaining = _remaining_seconds(round_start, rc.max_time_minutes)
-        if remaining <= 60:
+        if remaining <= _MIN_TEST_TIMEOUT_SECS:
             C.warn("Round time budget exhausted — stopping retries")
             break
 
@@ -246,7 +250,7 @@ def _execute_round(
 
         # Build retry prompt with last 100 lines
         test_lines = test_output_file.read_text().splitlines()
-        test_tail = "\n".join(test_lines[-100:])
+        test_tail = "\n".join(test_lines[-_TEST_FAILURE_TAIL_LINES:])
         retry_prompt = (
             "The tests are failing after your changes. Here is the test output:\n\n"
             f"```\n{test_tail}\n```\n\n"
@@ -254,7 +258,7 @@ def _execute_round(
             "issues causing the failures. Run the tests after your fixes."
         )
 
-        retry_budget = max(1.0, rc.max_budget_usd / 2)
+        retry_budget = max(_MIN_RETRY_BUDGET_USD, rc.max_budget_usd / 2)
         retry_log = log_dir / f"round-{round_num}-retry-{attempt}.log"
         retry_exit = run_claude(
             retry_prompt, system_context, retry_budget, rc.max_turns, retry_log,

@@ -15,6 +15,11 @@ from .output import C
 from .config import TEMPLATE_DIR, RoundConfig
 from .git_ops import git
 
+REVIEWER_BUDGET_USD = 1.00
+REVIEWER_MAX_TURNS = 5
+REVIEWER_TIMEOUT_MINUTES = 10
+REVIEWER_MAX_DIFF_CHARS = 8000
+
 
 def _kill_process_group(proc: subprocess.Popen, graceful_wait: float = 2.0) -> None:
     """Kill a process and its entire process group.
@@ -106,30 +111,19 @@ def _claude_env() -> dict[str, str]:
     return env
 
 
-def run_claude(
-    prompt: str,
-    system_ctx: str,
-    budget: float,
-    turns: int,
-    log_file: Path,
+def _run_claude_process(
+    cmd: list[str],
+    output_file: Path,
     timeout_minutes: int = 0,
-) -> int:
-    """Invoke claude -p and capture output to log. Returns exit code.
+) -> tuple[int, bool]:
+    """Spawn a claude subprocess, tee stderr to terminal, capture stdout to file.
 
     Stderr (progress messages) is tee'd to the terminal so the user can see
-    activity.  Stdout (JSON result) is captured only to the log file.
+    activity.  Stdout (JSON result) is captured only to *output_file*.
 
-    If *timeout_minutes* > 0, the subprocess is killed after that many minutes
-    and a non-zero exit code (``-1``) is returned.
+    Returns ``(exit_code, timed_out)``.  If *timeout_minutes* > 0, the
+    subprocess is killed after that many minutes.
     """
-    cmd = [
-        "claude", "-p", prompt,
-        "--append-system-prompt", system_ctx,
-        "--dangerously-skip-permissions",
-        "--max-budget-usd", f"{budget:.2f}",
-        "--max-turns", str(turns),
-        "--output-format", "json",
-    ]
     env = _claude_env()
     timeout_secs = timeout_minutes * 60 if timeout_minutes > 0 else None
     timed_out = False
@@ -149,9 +143,7 @@ def run_claude(
         timer.start()
     stderr_thread: threading.Thread | None = None
     try:
-        with log_file.open("w") as fout:
-            # Tee stderr (progress) to terminal only; stdout (JSON) to log file.
-            # Keeping stderr out of fout avoids concurrent writes from two threads.
+        with output_file.open("w") as fout:
             def _tee_stderr() -> None:
                 assert proc.stderr is not None
                 for line in proc.stderr:
@@ -176,13 +168,34 @@ def run_claude(
         if stderr_thread is not None:
             stderr_thread.join(timeout=5)
 
+    return proc.returncode, timed_out
+
+
+def run_claude(
+    prompt: str,
+    system_ctx: str,
+    budget: float,
+    turns: int,
+    log_file: Path,
+    timeout_minutes: int = 0,
+) -> int:
+    """Invoke claude -p and capture output to log. Returns exit code."""
+    cmd = [
+        "claude", "-p", prompt,
+        "--append-system-prompt", system_ctx,
+        "--dangerously-skip-permissions",
+        "--max-budget-usd", f"{budget:.2f}",
+        "--max-turns", str(turns),
+        "--output-format", "json",
+    ]
+    exit_code, timed_out = _run_claude_process(cmd, log_file, timeout_minutes)
     if timed_out:
         C.err(
             f"Claude timed out after {timeout_minutes} minutes — "
             f"increase max_time_minutes if the round needs more time"
         )
         return -1
-    return proc.returncode
+    return exit_code
 
 
 def _parse_verdict(raw: str) -> str:
@@ -225,10 +238,9 @@ def run_reviewer(
     # Get diff (check=False means git() won't raise on non-zero exit)
     diff_result = git("diff", pre_sha, "HEAD", check=False)
     diff_raw = diff_result.stdout or ""
-    max_diff = 8000
-    if len(diff_raw) > max_diff:
-        diff_content = diff_raw[:max_diff] + (
-            f"\n\n[... truncated {len(diff_raw) - max_diff} chars — "
+    if len(diff_raw) > REVIEWER_MAX_DIFF_CHARS:
+        diff_content = diff_raw[:REVIEWER_MAX_DIFF_CHARS] + (
+            f"\n\n[... truncated {len(diff_raw) - REVIEWER_MAX_DIFF_CHARS} chars — "
             f"review may miss issues in the remainder ...]"
         )
     else:
@@ -246,58 +258,20 @@ def run_reviewer(
     review_prompt = template_file.read_text().replace("DIFF_PLACEHOLDER", diff_content)
     review_output = log_dir / f"review-round-{round_num}.json"
 
-    # Invoke claude for review (tee stderr to terminal for progress)
-    review_timeout_minutes = 10
-    review_timed_out = False
-
-    def _kill_reviewer_on_timeout() -> None:
-        nonlocal review_timed_out
-        review_timed_out = True
-        _kill_process_group(rev_proc)
-
     cmd = [
         "claude", "-p", review_prompt,
         "--dangerously-skip-permissions",
-        "--max-budget-usd", "1.00",
-        "--max-turns", "5",
+        "--max-budget-usd", f"{REVIEWER_BUDGET_USD:.2f}",
+        "--max-turns", str(REVIEWER_MAX_TURNS),
         "--output-format", "json",
     ]
-    rev_proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1, env=_claude_env(), start_new_session=True,
+    exit_code, timed_out = _run_claude_process(
+        cmd, review_output, REVIEWER_TIMEOUT_MINUTES,
     )
-    rev_timer = threading.Timer(
-        review_timeout_minutes * 60, _kill_reviewer_on_timeout,
-    )
-    rev_timer.start()
-    rev_stderr_thread: threading.Thread | None = None
-    try:
-        with review_output.open("w") as fout:
-            def _tee_rev_stderr() -> None:
-                assert rev_proc.stderr is not None
-                for line in rev_proc.stderr:
-                    sys.stderr.write(line)
-                    sys.stderr.flush()
-
-            rev_stderr_thread = threading.Thread(target=_tee_rev_stderr, daemon=True)
-            rev_stderr_thread.start()
-            if rev_proc.stdout is not None:
-                for line in rev_proc.stdout:
-                    fout.write(line)
-            rev_proc.wait()
-    except BaseException:
-        _kill_process_group(rev_proc)
-        rev_proc.wait()
-        raise
-    finally:
-        rev_timer.cancel()
-        if rev_stderr_thread is not None:
-            rev_stderr_thread.join(timeout=5)
-
-    if review_timed_out:
-        C.warn(f"Reviewer timed out after {review_timeout_minutes}m — skipping review")
+    if timed_out:
+        C.warn(f"Reviewer timed out after {REVIEWER_TIMEOUT_MINUTES}m — skipping review")
         return None
-    C.log(f"Reviewer claude finished (exit {rev_proc.returncode})")
+    C.log(f"Reviewer claude finished (exit {exit_code})")
 
     verdict = _parse_verdict(review_output.read_text())
 
