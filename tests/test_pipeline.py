@@ -37,11 +37,11 @@ class TestRunRound:
             qp.pipeline_mod, "get_resource_snapshot", lambda gpu_type="none": "CPU: ok"
         )
         monkeypatch.setattr(
-            qp.pipeline_mod, "run_static_analysis", lambda *a, **kw: ""
+            qp.pipeline_mod, "run_static_analysis", lambda *a, **_kw: ""
         )
-        monkeypatch.setattr(qp.pipeline_mod, "git_stage_round_changes", lambda pre: None)
-        monkeypatch.setattr(qp.pipeline_mod, "git_commit", lambda msg: None)
-        monkeypatch.setattr(qp.pipeline_mod, "run_reviewer", lambda *a, **kw: None)
+        monkeypatch.setattr(qp.pipeline_mod, "git_stage_round_changes", lambda _pre: None)
+        monkeypatch.setattr(qp.pipeline_mod, "git_commit", lambda _msg: None)
+        monkeypatch.setattr(qp.pipeline_mod, "run_reviewer", lambda *a, **_kw: None)
         # Prevent resource monitor from actually running
         monkeypatch.setattr(
             qp.ResourceMonitor, "start", lambda self: None,
@@ -53,7 +53,7 @@ class TestRunRound:
     def test_claude_failure_hard_gate(
         self, round_file, log_dir, mock_env, monkeypatch
     ):
-        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 1)
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 1)
         result = qp.run_round(
             round_file, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
         )
@@ -64,14 +64,14 @@ class TestRunRound:
     ):
         f = tmp_path / "01-soft.md"
         f.write_text("---\nname: soft-round\ngate: soft\n---\nDo stuff.\n")
-        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 1)
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 1)
         result = qp.run_round(
             f, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
         )
         assert result == qp.RoundOutcome.SOFT_FAILED
 
     def test_no_changes(self, round_file, log_dir, mock_env, monkeypatch):
-        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
         # git diff --quiet returns 0 (no changes)
         monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=0))
         result = qp.run_round(
@@ -84,13 +84,13 @@ class TestRunRound:
     ):
         f = tmp_path / "01-none.md"
         f.write_text("---\nname: none-round\ngate: none\n---\nDo stuff.\n")
-        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
         # Simulate changes exist
         monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
         test_calls = []
         monkeypatch.setattr(
             qp.pipeline_mod, "run_tests_with_tee",
-            lambda *a, **kw: test_calls.append(1) or 0,
+            lambda *a, **_kw: test_calls.append(1) or 0,
         )
         result = qp.run_round(
             f, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
@@ -99,9 +99,9 @@ class TestRunRound:
         assert len(test_calls) == 0  # tests should not have been run
 
     def test_tests_pass(self, round_file, log_dir, mock_env, monkeypatch):
-        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
         monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
-        monkeypatch.setattr(qp.pipeline_mod, "run_tests_with_tee", lambda *a, **kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "run_tests_with_tee", lambda *a, **_kw: 0)
         result = qp.run_round(
             round_file, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
         )
@@ -110,10 +110,10 @@ class TestRunRound:
     def test_tests_fail_no_retries(
         self, round_file, log_dir, mock_env, monkeypatch
     ):
-        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
         monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
-        monkeypatch.setattr(qp.pipeline_mod, "run_tests_with_tee", lambda *a, **kw: 1)
-        monkeypatch.setattr(qp.pipeline_mod, "git_rollback_round", lambda pre: None)
+        monkeypatch.setattr(qp.pipeline_mod, "run_tests_with_tee", lambda *a, **_kw: 1)
+        monkeypatch.setattr(qp.pipeline_mod, "git_rollback_round", lambda _pre: None)
         result = qp.run_round(
             round_file, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
         )
@@ -126,10 +126,10 @@ class TestRunRound:
         f.write_text(
             "---\nname: retry-round\ngate: hard\nmax_retries: 1\n---\nDo stuff.\n"
         )
-        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
         monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
         test_attempts = []
-        def mock_tests(cmd, output_file, **kw):
+        def mock_tests(cmd, output_file, **_kw):
             test_attempts.append(1)
             # Write something so retry can read it
             output_file.write_text("FAIL: test_foo")
@@ -146,12 +146,12 @@ class TestRunRound:
     ):
         f = tmp_path / "01-soft.md"
         f.write_text("---\nname: soft-fail\ngate: soft\n---\nDo stuff.\n")
-        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
         monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
-        monkeypatch.setattr(qp.pipeline_mod, "run_tests_with_tee", lambda *a, **kw: 1)
+        monkeypatch.setattr(qp.pipeline_mod, "run_tests_with_tee", lambda *a, **_kw: 1)
         rolled_back = []
         monkeypatch.setattr(
-            qp.pipeline_mod, "git_rollback_round", lambda pre: rolled_back.append(1)
+            qp.pipeline_mod, "git_rollback_round", lambda _pre: rolled_back.append(1)
         )
         result = qp.run_round(
             f, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
@@ -177,11 +177,11 @@ class TestRunRoundWithPreparsedConfig:
             qp.pipeline_mod, "get_resource_snapshot", lambda gpu_type="none": "CPU: ok"
         )
         monkeypatch.setattr(
-            qp.pipeline_mod, "run_static_analysis", lambda *a, **kw: ""
+            qp.pipeline_mod, "run_static_analysis", lambda *a, **_kw: ""
         )
-        monkeypatch.setattr(qp.pipeline_mod, "git_stage_round_changes", lambda pre: None)
-        monkeypatch.setattr(qp.pipeline_mod, "git_commit", lambda msg: None)
-        monkeypatch.setattr(qp.pipeline_mod, "run_reviewer", lambda *a, **kw: None)
+        monkeypatch.setattr(qp.pipeline_mod, "git_stage_round_changes", lambda _pre: None)
+        monkeypatch.setattr(qp.pipeline_mod, "git_commit", lambda _msg: None)
+        monkeypatch.setattr(qp.pipeline_mod, "run_reviewer", lambda *a, **_kw: None)
         monkeypatch.setattr(qp.ResourceMonitor, "start", lambda self: None)
         monkeypatch.setattr(qp.ResourceMonitor, "stop", lambda self: None)
 
@@ -198,7 +198,7 @@ class TestRunRoundWithPreparsedConfig:
             max_budget_usd=1.0, max_turns=5, max_time_minutes=1,
             review=False,
         )
-        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
         # gate=none means tests are skipped, so we just need changes to exist
         monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
 
@@ -248,21 +248,21 @@ class TestRunRoundReviewerVerdict:
             qp.pipeline_mod, "get_resource_snapshot", lambda gpu_type="none": "CPU: ok"
         )
         monkeypatch.setattr(
-            qp.pipeline_mod, "run_static_analysis", lambda *a, **kw: ""
+            qp.pipeline_mod, "run_static_analysis", lambda *a, **_kw: ""
         )
-        monkeypatch.setattr(qp.pipeline_mod, "git_stage_round_changes", lambda pre: None)
-        monkeypatch.setattr(qp.pipeline_mod, "git_commit", lambda msg: None)
+        monkeypatch.setattr(qp.pipeline_mod, "git_stage_round_changes", lambda _pre: None)
+        monkeypatch.setattr(qp.pipeline_mod, "git_commit", lambda _msg: None)
         monkeypatch.setattr(qp.ResourceMonitor, "start", lambda self: None)
         monkeypatch.setattr(qp.ResourceMonitor, "stop", lambda self: None)
 
     def test_critical_verdict_hard_gate_fails_round(
         self, round_file, log_dir, mock_env, monkeypatch
     ):
-        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
         # Simulate changes exist (gate=none skips tests, goes straight to commit+review)
         monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
         monkeypatch.setattr(
-            qp.pipeline_mod, "run_reviewer", lambda *a, **kw: "critical"
+            qp.pipeline_mod, "run_reviewer", lambda *a, **_kw: "critical"
         )
         result = qp.run_round(
             round_file, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
@@ -315,13 +315,13 @@ class TestPipeline:
         # We're in a git repo (mock subprocess for git check)
         monkeypatch.setattr(
             subprocess, "run",
-            lambda *a, **kw: MagicMock(returncode=0, stdout="", stderr=""),
+            lambda *a, **_kw: MagicMock(returncode=0, stdout="", stderr=""),
         )
         # Mock git helper
         monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(stdout="abc1234\n"))
-        monkeypatch.setattr(qp.pipeline_mod, "git_acquire_lock", lambda dry_run: None)
+        monkeypatch.setattr(qp.pipeline_mod, "git_acquire_lock", lambda _dry_run: None)
         monkeypatch.setattr(qp.pipeline_mod, "git_has_uncommitted", lambda: False)
-        monkeypatch.setattr(qp.pipeline_mod, "git_create_branch", lambda name: None)
+        monkeypatch.setattr(qp.pipeline_mod, "git_create_branch", lambda _name: None)
         monkeypatch.setattr(qp.pipeline_mod, "detect_gpu", lambda: "none")
         monkeypatch.setattr(
             qp.pipeline_mod, "get_resource_snapshot", lambda gpu_type="none": "CPU: ok"
@@ -336,7 +336,7 @@ class TestPipeline:
         run_round_calls = []
         monkeypatch.setattr(
             qp.pipeline_mod, "run_round",
-            lambda *a, **kw: run_round_calls.append(1) or qp.RoundOutcome.PASSED,
+            lambda *a, **_kw: run_round_calls.append(1) or qp.RoundOutcome.PASSED,
         )
         qp.pipeline(
             project_dir=None,
@@ -355,7 +355,7 @@ class TestPipeline:
     def test_single_round_passes(self, pipeline_env, monkeypatch):
         monkeypatch.setattr(
             qp.pipeline_mod, "run_round",
-            lambda *a, **kw: qp.RoundOutcome.PASSED,
+            lambda *a, **_kw: qp.RoundOutcome.PASSED,
         )
         # Should not raise or sys.exit
         qp.pipeline(
@@ -374,7 +374,7 @@ class TestPipeline:
     def test_hard_failure_exits_nonzero(self, pipeline_env, monkeypatch):
         monkeypatch.setattr(
             qp.pipeline_mod, "run_round",
-            lambda *a, **kw: qp.RoundOutcome.HARD_FAILED,
+            lambda *a, **_kw: qp.RoundOutcome.HARD_FAILED,
         )
         with pytest.raises(SystemExit) as exc_info:
             qp.pipeline(
@@ -397,7 +397,7 @@ class TestPipeline:
             "---\nname: refactor\ngate: hard\n---\nRefactor stuff.\n"
         )
         round_names = []
-        def mock_run_round(rf, n, total, *args, **kwargs):
+        def mock_run_round(rf, _n, _total, *args, **_kwargs):
             rc = qp.parse_frontmatter(rf)
             round_names.append(rc.name)
             return qp.RoundOutcome.PASSED
@@ -418,7 +418,7 @@ class TestPipeline:
         assert round_names == ["refactor"]
 
     def test_no_test_command_auto_detect_fails(self, pipeline_env, monkeypatch):
-        monkeypatch.setattr(qp.pipeline_mod, "detect_test_command", lambda path: None)
+        monkeypatch.setattr(qp.pipeline_mod, "detect_test_command", lambda _path: None)
         with pytest.raises(SystemExit):
             qp.pipeline(
                 project_dir=None,
@@ -488,7 +488,7 @@ class TestPipeline:
             "---\nname: refactor\ngate: hard\n---\nRefactor stuff.\n"
         )
         call_count = [0]
-        def mock_run_round(*args, **kwargs):
+        def mock_run_round(*args, **_kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 return qp.RoundOutcome.SOFT_FAILED
@@ -536,7 +536,7 @@ class TestPipeline:
             "---\nname: concurrency\ngate: hard\n---\nConcurrency.\n"
         )
         executed = []
-        def mock_run_round(rf, n, total, *args, **kwargs):
+        def mock_run_round(rf, _n, _total, *args, **_kwargs):
             rc = qp.parse_frontmatter(rf)
             executed.append(rc.name)
             if rc.name == "refactor":
@@ -582,7 +582,7 @@ class TestPipeline:
             "overrides": {"audit": {"gate": "soft"}},
         }))
         configs_seen = []
-        def mock_run_round(rf, n, total, test_cmd, config, *args, **kwargs):
+        def mock_run_round(rf, _n, _total, test_cmd, config, *args, **_kwargs):
             configs_seen.append((test_cmd, config))
             return qp.RoundOutcome.PASSED
         monkeypatch.setattr(qp.pipeline_mod, "run_round", mock_run_round)

@@ -155,7 +155,7 @@ class TestRunAnalyzer:
         monkeypatch.setattr(shutil, "which", mock_which)
         monkeypatch.setattr(
             subprocess, "run",
-            lambda *a, **kw: MagicMock(stdout="  finding1  ", returncode=0),
+            lambda *a, **_kw: MagicMock(stdout="  finding1  ", returncode=0),
         )
         result = qp._run_analyzer(
             "bandit", ["bandit", "."], tmp_path, ["pyproject.toml"]
@@ -170,7 +170,7 @@ class TestRunAnalyzer:
         monkeypatch.setattr(shutil, "which", mock_which)
         monkeypatch.setattr(
             subprocess, "run",
-            lambda *a, **kw: (_ for _ in ()).throw(OSError("boom")),
+            lambda *a, **_kw: (_ for _ in ()).throw(OSError("boom")),
         )
         assert qp._run_analyzer("mypy", ["mypy", "."], tmp_path) == ""
 
@@ -178,7 +178,7 @@ class TestRunAnalyzer:
         run_calls = []
         def mock_which(name):
             return f"/usr/bin/{name}"
-        def mock_run(*args, **kwargs):
+        def mock_run(*args, **_kwargs):
             run_calls.append(args[0])
             return MagicMock(stdout="ok", returncode=0)
         monkeypatch.setattr(shutil, "which", mock_which)
@@ -194,7 +194,7 @@ class TestRunStaticAnalysis:
     def test_override_analyzers(self, monkeypatch):
         monkeypatch.setattr(
             qp.detection, "_run_analyzer",
-            lambda name, args, proj, prereqs=None: f"output-{name}",
+            lambda name, _args, _proj, _prereqs=None: f"output-{name}",
         )
         result = qp.run_static_analysis("any-round", Path("."), "mypy vulture")
         assert "### mypy" in result
@@ -204,7 +204,7 @@ class TestRunStaticAnalysis:
     def test_truncation(self, monkeypatch):
         monkeypatch.setattr(
             qp.detection, "_run_analyzer",
-            lambda name, args, proj, prereqs=None: "x" * 5000,
+            lambda _name, _args, _proj, _prereqs=None: "x" * 5000,
         )
         result = qp.run_static_analysis("security", Path("."))
         assert result.endswith("\n[... truncated]")
@@ -213,7 +213,7 @@ class TestRunStaticAnalysis:
     def test_unknown_analyzer_skipped(self, monkeypatch):
         monkeypatch.setattr(
             qp.detection, "_run_analyzer",
-            lambda name, args, proj, prereqs=None: "found",
+            lambda _name, _args, _proj, _prereqs=None: "found",
         )
         result = qp.run_static_analysis("any", Path("."), "nonexistent_tool")
         assert result == ""

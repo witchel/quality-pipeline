@@ -257,7 +257,7 @@ class TestGitAcquireLockStaleness:
 
         monkeypatch.setattr(qp.git_ops, "git", _mock_git_fn(stdout=str(git_dir) + "\n"))
 
-        def _kill_raises(pid, sig):
+        def _kill_raises(_pid, _sig):
             raise ProcessLookupError
 
         monkeypatch.setattr(qp.git_ops.os, "kill", _kill_raises)

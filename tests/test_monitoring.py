@@ -33,7 +33,7 @@ class TestDetectGpu:
         )
         monkeypatch.setattr(
             subprocess, "run",
-            lambda *a, **kw: MagicMock(returncode=0),
+            lambda *a, **_kw: MagicMock(returncode=0),
         )
         assert qp.detect_gpu() == "nvidia"
 
@@ -42,7 +42,7 @@ class TestDetectGpu:
             shutil, "which",
             lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None,
         )
-        def mock_run(*a, **kw):
+        def mock_run(*a, **_kw):
             raise subprocess.TimeoutExpired("nvidia-smi", 5)
         monkeypatch.setattr(subprocess, "run", mock_run)
         assert qp.detect_gpu() == "none"
@@ -62,7 +62,7 @@ class TestGetResourceSnapshot:
     def test_nvidia_gpu_snapshot(self, monkeypatch):
         """Mock nvidia-smi CSV output and verify GPU info is included."""
         csv_output = "0, 45, 2048, 8192\n1, 0, 100, 8192\n"
-        def mock_run(cmd, **kwargs):
+        def mock_run(cmd, **_kwargs):
             if cmd[0] == "nvidia-smi":
                 return MagicMock(stdout=csv_output, returncode=0)
             # Fall through for sysctl/vm_stat
@@ -76,7 +76,7 @@ class TestGetResourceSnapshot:
     def test_nvidia_gpu_all_idle(self, monkeypatch):
         """When all GPUs are idle, GPU info should be omitted."""
         csv_output = "0, 0, 100, 8192\n"
-        def mock_run(cmd, **kwargs):
+        def mock_run(cmd, **_kwargs):
             if cmd[0] == "nvidia-smi":
                 return MagicMock(stdout=csv_output, returncode=0)
             return MagicMock(stdout="0", returncode=0)
@@ -99,7 +99,7 @@ class TestDetectGpuMoved:
         )
         monkeypatch.setattr(
             subprocess, "run",
-            lambda *a, **kw: (_ for _ in ()).throw(
+            lambda *a, **_kw: (_ for _ in ()).throw(
                 subprocess.CalledProcessError(1, "nvidia-smi")
             ),
         )

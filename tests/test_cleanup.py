@@ -121,7 +121,7 @@ class TestCleanupWorktree:
 
         monkeypatch.setattr(
             subprocess, "run",
-            lambda *a, **kw: MagicMock(returncode=0),
+            lambda *a, **_kw: MagicMock(returncode=0),
         )
         cleanup._cleanup_worktree()
         assert Path.cwd() == orig
@@ -139,7 +139,7 @@ class TestCleanupWorktree:
 
         monkeypatch.setattr(
             subprocess, "run",
-            lambda *a, **kw: MagicMock(returncode=0),
+            lambda *a, **_kw: MagicMock(returncode=0),
         )
         cleanup._cleanup_worktree()  # should not raise
         assert cleanup.worktree_dir is None
@@ -163,7 +163,7 @@ class TestCleanupWorktree:
 
         monkeypatch.setattr(
             subprocess, "run",
-            lambda *a, **kw: MagicMock(returncode=0),
+            lambda *a, **_kw: MagicMock(returncode=0),
         )
         cleanup._cleanup_worktree()
         assert not link.exists()
@@ -188,7 +188,7 @@ class TestCleanupWorktree:
 
         monkeypatch.setattr(
             subprocess, "run",
-            lambda *a, **kw: MagicMock(returncode=0),
+            lambda *a, **_kw: MagicMock(returncode=0),
         )
         cleanup._cleanup_worktree()
         assert not env_link.exists()
@@ -206,7 +206,7 @@ class TestCleanupWorktree:
         cleanup.symlink_dirs = []
 
         call_count = [0]
-        def mock_run(cmd, **kwargs):
+        def mock_run(cmd, **_kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 raise subprocess.CalledProcessError(1, cmd)

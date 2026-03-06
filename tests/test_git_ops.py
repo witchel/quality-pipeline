@@ -262,7 +262,7 @@ class TestSetupWorktree:
         wt_path = tmp_path / "worktree-dir"
         self._setup_worktree_mocks(monkeypatch, calls, wt_path, branch_exists=False)
 
-        wt_dir, original_dir = qp.setup_worktree("quality/test", [])
+        _wt_dir, original_dir = qp.setup_worktree("quality/test", [])
         assert original_dir == orig_dir
         wt_calls = [c for c in calls if "worktree" in c]
         assert any("-b" in c for c in wt_calls)

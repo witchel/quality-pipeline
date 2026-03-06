@@ -114,7 +114,7 @@ class TestRunTestsStdbuf:
         captured_cmds = []
         original_popen = subprocess.Popen
 
-        def capture_popen(cmd, **kwargs):
+        def capture_popen(cmd, **_kwargs):
             captured_cmds.append(cmd)
             # Replace the stdbuf-prefixed cmd with just the original command
             # so the test can actually run
@@ -123,7 +123,7 @@ class TestRunTestsStdbuf:
                 if cmd.startswith(prefix):
                     clean_cmd = cmd[len(prefix):]
                     break
-            return original_popen(clean_cmd, **kwargs)
+            return original_popen(clean_cmd, **_kwargs)
 
         monkeypatch.setattr(subprocess, "Popen", capture_popen)
         monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/stdbuf" if name == "stdbuf" else None)
@@ -195,7 +195,7 @@ class TestRunClaude:
 
         class InstantTimer:
             """Timer that calls its callback immediately on start()."""
-            def __init__(self, interval, function):
+            def __init__(self, _interval, function):
                 self._fn = function
             def start(self):
                 self._fn()
@@ -260,14 +260,14 @@ class TestRunReviewer:
     def test_skips_when_review_disabled(self, monkeypatch):
         """Should return immediately when review is not enabled."""
         calls = []
-        monkeypatch.setattr(qp.process, "git", lambda *a, **kw: calls.append(a))
+        monkeypatch.setattr(qp.process, "git", lambda *a, **_kw: calls.append(a))
         qp.run_reviewer(1, self._make_rc(review=False), "abc", Path("/tmp"), None)
         assert len(calls) == 0  # no git calls made
 
     def test_cli_flag_overrides_rc(self, monkeypatch):
         """review_flag=False should override rc.review=True."""
         calls = []
-        monkeypatch.setattr(qp.process, "git", lambda *a, **kw: calls.append(a))
+        monkeypatch.setattr(qp.process, "git", lambda *a, **_kw: calls.append(a))
         qp.run_reviewer(1, self._make_rc(review=True), "abc", Path("/tmp"), False)
         assert len(calls) == 0
 
@@ -279,7 +279,7 @@ class TestRunReviewer:
         )
         monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
         (tmp_path / "reviewer.md").write_text("Review: DIFF_PLACEHOLDER")
-        def mock_popen(*args, **kwargs):
+        def mock_popen(*args, **_kwargs):
             proc = MagicMock()
             proc.pid = -1
             proc.stdout = io.StringIO('{"verdict": "pass"}')
@@ -328,7 +328,7 @@ class TestRunReviewer:
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
 
-        def mock_popen(*args, **kwargs):
+        def mock_popen(*args, **_kwargs):
             proc = MagicMock()
             proc.pid = -1
             proc.stdout = io.StringIO(verdict_json)
@@ -394,7 +394,7 @@ class TestRunReviewer:
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
 
-        def mock_popen(*args, **kwargs):
+        def mock_popen(*args, **_kwargs):
             proc = MagicMock()
             proc.pid = -1
             proc.stdout = io.StringIO(json.dumps({"verdict": "critical"}))
@@ -421,7 +421,7 @@ class TestRunReviewer:
         log_dir.mkdir()
 
         captured_prompt = []
-        def mock_popen(cmd, **kwargs):
+        def mock_popen(cmd, **_kwargs):
             captured_prompt.append(cmd)
             proc = MagicMock()
             proc.pid = -1
@@ -450,7 +450,7 @@ class TestRunReviewer:
         log_dir.mkdir()
 
         class InstantTimer:
-            def __init__(self, interval, function):
+            def __init__(self, _interval, function):
                 self._fn = function
             def start(self):
                 self._fn()
@@ -458,7 +458,7 @@ class TestRunReviewer:
                 pass
 
         monkeypatch.setattr(threading, "Timer", InstantTimer)
-        def mock_popen(*args, **kwargs):
+        def mock_popen(*args, **_kwargs):
             proc = MagicMock()
             proc.pid = -1
             proc.stdout = io.StringIO("")
