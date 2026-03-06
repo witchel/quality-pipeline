@@ -1390,7 +1390,7 @@ class TestRunRound:
         test_calls = []
         monkeypatch.setattr(
             qp, "run_tests_with_tee",
-            lambda *a: test_calls.append(1) or 0,
+            lambda *a, **kw: test_calls.append(1) or 0,
         )
         result = qp.run_round(
             f, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
@@ -1401,7 +1401,7 @@ class TestRunRound:
     def test_tests_pass(self, round_file, log_dir, mock_env, monkeypatch):
         monkeypatch.setattr(qp, "run_claude", lambda *a, **kw: 0)
         monkeypatch.setattr(qp, "git", _mock_git_fn(returncode=1))
-        monkeypatch.setattr(qp, "run_tests_with_tee", lambda *a: 0)
+        monkeypatch.setattr(qp, "run_tests_with_tee", lambda *a, **kw: 0)
         result = qp.run_round(
             round_file, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
         )
@@ -1412,7 +1412,7 @@ class TestRunRound:
     ):
         monkeypatch.setattr(qp, "run_claude", lambda *a, **kw: 0)
         monkeypatch.setattr(qp, "git", _mock_git_fn(returncode=1))
-        monkeypatch.setattr(qp, "run_tests_with_tee", lambda cmd, f: 1)
+        monkeypatch.setattr(qp, "run_tests_with_tee", lambda *a, **kw: 1)
         monkeypatch.setattr(qp, "git_rollback_round", lambda pre: None)
         result = qp.run_round(
             round_file, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
@@ -1429,7 +1429,7 @@ class TestRunRound:
         monkeypatch.setattr(qp, "run_claude", lambda *a, **kw: 0)
         monkeypatch.setattr(qp, "git", _mock_git_fn(returncode=1))
         test_attempts = []
-        def mock_tests(cmd, output_file):
+        def mock_tests(cmd, output_file, **kw):
             test_attempts.append(1)
             # Write something so retry can read it
             output_file.write_text("FAIL: test_foo")
@@ -1448,7 +1448,7 @@ class TestRunRound:
         f.write_text("---\nname: soft-fail\ngate: soft\n---\nDo stuff.\n")
         monkeypatch.setattr(qp, "run_claude", lambda *a, **kw: 0)
         monkeypatch.setattr(qp, "git", _mock_git_fn(returncode=1))
-        monkeypatch.setattr(qp, "run_tests_with_tee", lambda cmd, f: 1)
+        monkeypatch.setattr(qp, "run_tests_with_tee", lambda *a, **kw: 1)
         rolled_back = []
         monkeypatch.setattr(
             qp, "git_rollback_round", lambda pre: rolled_back.append(1)
@@ -1458,6 +1458,52 @@ class TestRunRound:
         )
         assert result == qp.RoundOutcome.SOFT_FAILED
         assert len(rolled_back) == 1
+
+
+# ---------------------------------------------------------------------------
+# _check_review_verdict
+# ---------------------------------------------------------------------------
+
+
+class TestCheckReviewVerdict:
+    def _rc(self, review_gate="none"):
+        return qp.RoundConfig(name="test", review_gate=review_gate)
+
+    def test_none_verdict_passes(self):
+        assert qp._check_review_verdict(None, self._rc()) == qp.RoundOutcome.PASSED
+
+    def test_pass_verdict_passes(self):
+        assert qp._check_review_verdict("pass", self._rc()) == qp.RoundOutcome.PASSED
+
+    def test_warn_verdict_passes(self):
+        assert qp._check_review_verdict("warn", self._rc()) == qp.RoundOutcome.PASSED
+
+    def test_critical_gate_none_passes(self):
+        assert qp._check_review_verdict("critical", self._rc("none")) == qp.RoundOutcome.PASSED
+
+    def test_critical_gate_hard_fails(self):
+        assert qp._check_review_verdict("critical", self._rc("hard")) == qp.RoundOutcome.HARD_FAILED
+
+    def test_critical_gate_soft_fails(self):
+        assert qp._check_review_verdict("critical", self._rc("soft")) == qp.RoundOutcome.SOFT_FAILED
+
+
+# ---------------------------------------------------------------------------
+# run_tests_with_tee timeout
+# ---------------------------------------------------------------------------
+
+
+class TestRunTestsTimeout:
+    def test_timeout_returns_negative_one(self, tmp_path):
+        output_file = tmp_path / "test.out"
+        # sleep 60 will be killed quickly by the 1s timeout
+        code = qp.run_tests_with_tee("sleep 60", output_file, timeout_seconds=1)
+        assert code == -1
+
+    def test_no_timeout_by_default(self, tmp_path):
+        output_file = tmp_path / "test.out"
+        code = qp.run_tests_with_tee("echo ok", output_file)
+        assert code == 0
 
 
 # ---------------------------------------------------------------------------

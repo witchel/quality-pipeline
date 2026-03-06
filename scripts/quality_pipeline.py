@@ -61,6 +61,7 @@ DEFAULT_ANALYZERS: dict[str, str] = {
 MAX_ANALYSIS_OUTPUT = 4000
 
 VALID_GATES = {"hard", "soft", "none"}
+VALID_REVIEW_GATES = {"hard", "soft", "none"}
 
 _DEFAULT_MAX_BUDGET_USD = 5.00
 _DEFAULT_MAX_TURNS = 30
@@ -81,6 +82,7 @@ class RoundConfig:
     gate: str = "hard"
     max_retries: int = 0
     review: bool | None = None  # None = not set (defaults to False)
+    review_gate: str = "none"  # none=advisory, soft/hard=verdict can fail round
     analyzers: str = ""
 
 
@@ -115,13 +117,15 @@ class RoundResult:
 
 class ColorOutput:
     def __init__(self) -> None:
-        is_tty = sys.stdout.isatty()
-        self.RED = "\033[0;31m" if is_tty else ""
-        self.GREEN = "\033[0;32m" if is_tty else ""
-        self.YELLOW = "\033[1;33m" if is_tty else ""
-        self.BLUE = "\033[0;34m" if is_tty else ""
-        self.BOLD = "\033[1m" if is_tty else ""
-        self.NC = "\033[0m" if is_tty else ""
+        out_tty = sys.stdout.isatty()
+        err_tty = sys.stderr.isatty()
+        self.RED = "\033[0;31m" if err_tty else ""
+        self.GREEN = "\033[0;32m" if out_tty else ""
+        self.YELLOW = "\033[1;33m" if out_tty else ""
+        self.BLUE = "\033[0;34m" if out_tty else ""
+        self.BOLD = "\033[1m" if out_tty else ""
+        self.NC = "\033[0m" if (out_tty or err_tty) else ""
+        self._err_nc = "\033[0m" if err_tty else ""
 
     def log(self, msg: str) -> None:
         print(f"{self.BLUE}[pipeline]{self.NC} {msg}", flush=True)
@@ -133,7 +137,7 @@ class ColorOutput:
         print(f"{self.YELLOW}[pipeline]{self.NC} {msg}", flush=True)
 
     def err(self, msg: str) -> None:
-        print(f"{self.RED}[pipeline]{self.NC} {msg}", file=sys.stderr, flush=True)
+        print(f"{self.RED}[pipeline]{self._err_nc} {msg}", file=sys.stderr, flush=True)
 
 
 C = ColorOutput()
@@ -349,11 +353,16 @@ class PipelineCleanup:
         return p
 
     def cleanup(self) -> None:
-        # Block signals so cleanup can't be interrupted mid-way
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        if hasattr(signal, "SIGHUP"):
-            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        # Block signals so cleanup can't be interrupted mid-way.
+        # Guard: signal.signal() must be called from the main thread and the
+        # signal module may be partially torn down during interpreter shutdown.
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            if hasattr(signal, "SIGHUP"):
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        except (ValueError, OSError, TypeError):
+            pass
 
         if self.monitor:
             self.monitor.stop()
@@ -547,7 +556,7 @@ def _run_analyzer(name: str, args: list[str], project_dir: Path,
             capture_output=True, text=True, check=False, cwd=project_dir,
         )
         return result.stdout.strip()
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return ""
 
 
@@ -644,6 +653,7 @@ def parse_frontmatter(path: Path) -> RoundConfig:
         gate=str(data.get("gate", "hard")),
         max_retries=int(data.get("max_retries", 0)),
         review=review,
+        review_gate=str(data.get("review_gate", "none")),
         analyzers=str(data.get("analyzers", "")),
     )
 
@@ -705,6 +715,12 @@ def _finalize_round_config(rc: RoundConfig) -> RoundConfig:
     if rc.gate not in VALID_GATES:
         C.warn(f"Unknown gate '{rc.gate}' for round '{rc.name}' — defaulting to 'hard'")
         changes["gate"] = "hard"
+    if rc.review_gate not in VALID_REVIEW_GATES:
+        C.warn(
+            f"Unknown review_gate '{rc.review_gate}' for round '{rc.name}' "
+            f"— defaulting to 'none'"
+        )
+        changes["review_gate"] = "none"
     return replace(rc, **changes) if changes else rc
 
 
@@ -738,6 +754,8 @@ def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConf
         rc.max_retries = int(ov["max_retries"])
     if "review" in ov:
         rc.review = _parse_review_bool(ov["review"])
+    if "review_gate" in ov:
+        rc.review_gate = str(ov["review_gate"])
     if "analyzers" in ov:
         rc.analyzers = str(ov["analyzers"])
     return _finalize_round_config(rc)
@@ -836,15 +854,21 @@ def git_create_branch(branch_name: str) -> None:
 
 
 def git_commit(msg: str) -> None:
-    """Commit staged changes."""
+    """Commit staged changes.
+
+    Tries --no-gpg-sign first (avoid passphrase prompts in headless pipeline),
+    falls back to a plain commit if the flag itself is rejected.
+    """
     result = git("commit", "-m", msg, "--no-gpg-sign", check=False)
-    if result.returncode != 0:
-        stderr = result.stderr or ""
-        if "gpg" in stderr.lower() or "sign" in stderr.lower():
-            git("commit", "-m", msg)
-        else:
-            C.err(f"git commit failed: {stderr.strip()}")
-            raise subprocess.CalledProcessError(result.returncode, "git commit")
+    if result.returncode == 0:
+        return
+    # Retry without --no-gpg-sign in case git is too old to support it
+    result2 = git("commit", "-m", msg, check=False)
+    if result2.returncode == 0:
+        return
+    stderr = (result2.stderr or result.stderr or "").strip()
+    C.err(f"git commit failed: {stderr}")
+    raise subprocess.CalledProcessError(result2.returncode, "git commit")
 
 
 def git_acquire_lock(dry_run: bool) -> Path | None:
@@ -907,12 +931,29 @@ def setup_worktree(
 # ---------------------------------------------------------------------------
 
 
-def run_tests_with_tee(cmd: str, output_file: Path) -> int:
-    """Run tests, teeing output to both stdout and a file. Returns exit code."""
+def run_tests_with_tee(
+    cmd: str, output_file: Path, timeout_seconds: int = 0,
+) -> int:
+    """Run tests, teeing output to both stdout and a file. Returns exit code.
+
+    If *timeout_seconds* > 0, the test process is killed after that many
+    seconds and exit code ``-1`` is returned.
+    """
+    timed_out = False
+
+    def _kill_on_timeout() -> None:
+        nonlocal timed_out
+        timed_out = True
+        proc.kill()
+
     proc = subprocess.Popen(
         cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
     )
+    timer: threading.Timer | None = None
+    if timeout_seconds > 0:
+        timer = threading.Timer(timeout_seconds, _kill_on_timeout)
+        timer.start()
     try:
         with output_file.open("w") as fout:
             if proc.stdout is not None:
@@ -920,11 +961,19 @@ def run_tests_with_tee(cmd: str, output_file: Path) -> int:
                     sys.stdout.write(line)
                     sys.stdout.flush()
                     fout.write(line)
-        return proc.wait()
+        proc.wait()
     except BaseException:
         proc.kill()
         proc.wait()
         raise
+    finally:
+        if timer is not None:
+            timer.cancel()
+
+    if timed_out:
+        C.err(f"Tests timed out after {timeout_seconds}s")
+        return -1
+    return proc.returncode
 
 
 def _claude_env() -> dict[str, str]:
@@ -978,13 +1027,13 @@ def run_claude(
         timer.start()
     try:
         with log_file.open("w") as fout:
-            # Tee stderr (progress) to terminal + log; capture stdout (JSON) to log only
+            # Tee stderr (progress) to terminal only; stdout (JSON) to log file.
+            # Keeping stderr out of fout avoids concurrent writes from two threads.
             def _tee_stderr() -> None:
                 assert proc.stderr is not None
                 for line in proc.stderr:
                     sys.stderr.write(line)
                     sys.stderr.flush()
-                    fout.write(line)
 
             t = threading.Thread(target=_tee_stderr, daemon=True)
             t.start()
@@ -1040,12 +1089,12 @@ def run_reviewer(
     pre_sha: str,
     log_dir: Path,
     review_flag: bool | None,
-) -> None:
-    """Run the reviewer pass if enabled."""
+) -> str | None:
+    """Run the reviewer pass if enabled. Returns verdict or None if skipped."""
     # CLI flag > config/frontmatter (already merged by apply_config_overrides)
     review_enabled = review_flag if review_flag is not None else rc.review
     if not review_enabled:
-        return
+        return None
 
     C.log("Running reviewer pass...")
 
@@ -1063,12 +1112,12 @@ def run_reviewer(
 
     if not diff_content:
         C.warn("No diff to review — skipping reviewer")
-        return
+        return None
 
     template_file = TEMPLATE_DIR / "reviewer.md"
     if not template_file.exists():
         C.warn(f"Reviewer template not found: {template_file} — skipping")
-        return
+        return None
 
     review_prompt = template_file.read_text().replace("DIFF_PLACEHOLDER", diff_content)
     review_output = log_dir / f"review-round-{round_num}.json"
@@ -1116,6 +1165,20 @@ def run_reviewer(
         C.err(f"Reviewer: {C.RED}CRITICAL{C.NC} — see {review_output}")
     else:
         C.warn(f"Reviewer: could not parse verdict — see {review_output}")
+    return verdict
+
+
+def _check_review_verdict(verdict: str | None, rc: RoundConfig) -> RoundOutcome:
+    """Map a reviewer verdict + review_gate config to a round outcome."""
+    if verdict is None or verdict != "critical" or rc.review_gate == "none":
+        return RoundOutcome.PASSED
+    C.err(
+        f"Reviewer found CRITICAL issues (review_gate={rc.review_gate}) "
+        f"— treating as {rc.review_gate} gate failure"
+    )
+    if rc.review_gate == "hard":
+        return RoundOutcome.HARD_FAILED
+    return RoundOutcome.SOFT_FAILED
 
 
 def _print_round_header(round_num: int, total: int, rc: RoundConfig) -> None:
@@ -1171,6 +1234,11 @@ def _execute_round(
     pre_sha: str,
 ) -> RoundOutcome:
     """Inner round execution: prompt, Claude, tests, commit."""
+    # _finalize_round_config guarantees these are set
+    assert rc.max_budget_usd is not None
+    assert rc.max_turns is not None
+    assert rc.max_time_minutes is not None
+
     prompt = get_round_prompt(round_file)
     prompt = apply_config_prompt_append(rc.name, prompt, config)
 
@@ -1179,7 +1247,7 @@ def _execute_round(
     # Build system context
     system_context = (
         f"You are running as part of an automated quality pipeline.\n"
-        f"This is round {round_num} of {total_rounds}.\n"
+        f"This is round {round_num} of {total_rounds}: {rc.name}.\n"
         f"The test command for this project is: {test_cmd}\n"
         f"After making changes, run the tests to verify nothing is broken.\n"
         f"Do not commit your changes — the pipeline handles commits.\n"
@@ -1195,6 +1263,8 @@ def _execute_round(
         rc.name, Path.cwd(), rc.analyzers
     )
     if analysis_output:
+        # Save to log dir for post-hoc debugging
+        (log_dir / f"analysis-round-{round_num}.txt").write_text(analysis_output)
         prompt += (
             "\n\n## Static Analysis Results\n"
             "The following issues were found by static analysis tools. "
@@ -1257,18 +1327,22 @@ def _execute_round(
         commit_msg = f"{rc.commit_message_prefix}{rc.name} (round {round_num}/{total_rounds})"
         git_commit(commit_msg)
         C.ok(f"Committed: {commit_msg} (gate=none, tests skipped)")
-        run_reviewer(round_num, rc, pre_sha, log_dir, review_flag)
-        _finish("passed")
-        return RoundOutcome.PASSED
+        verdict = run_reviewer(round_num, rc, pre_sha, log_dir, review_flag)
+        outcome = _check_review_verdict(verdict, rc)
+        _finish("passed" if outcome == RoundOutcome.PASSED else "review-failed")
+        return outcome
 
     # --- Test + retry loop ---
     test_output_file = _cleanup.make_temp()
+    test_timeout = rc.max_time_minutes * 60
     attempt = 0
     tests_passed = False
 
     while True:
         C.log(f"Running tests: {test_cmd}")
-        test_exit = run_tests_with_tee(test_cmd, test_output_file)
+        test_exit = run_tests_with_tee(
+            test_cmd, test_output_file, timeout_seconds=test_timeout,
+        )
 
         if test_exit == 0:
             C.ok("Tests passed")
@@ -1321,11 +1395,11 @@ def _execute_round(
     git_commit(commit_msg)
     C.ok(f"Committed: {commit_msg}")
 
-    # Run reviewer
-    run_reviewer(round_num, rc, pre_sha, log_dir, review_flag)
-
-    _finish("passed")
-    return RoundOutcome.PASSED
+    # Run reviewer — verdict may downgrade the round outcome
+    verdict = run_reviewer(round_num, rc, pre_sha, log_dir, review_flag)
+    outcome = _check_review_verdict(verdict, rc)
+    _finish("passed" if outcome == RoundOutcome.PASSED else "review-failed")
+    return outcome
 
 
 # ---------------------------------------------------------------------------
@@ -1489,16 +1563,20 @@ def pipeline(
         log_dir = Path(tempfile.mkdtemp(prefix=f"quality-pipeline-{os.getpid()}-"))
     C.log(f"Log directory: {log_dir}")
 
+    # Parse all rounds once upfront
+    round_configs = [
+        (rf, apply_config_overrides(parse_frontmatter(rf), config))
+        for rf in round_files
+    ]
+
     # Print plan
     print()
     C.log(f"{C.BOLD}Quality Pipeline Plan{C.NC}")
     C.log(f"Branch: {branch_name}")
     C.log(f"Test command: {effective_test_cmd}")
     C.log(f"Rounds: {total} (starting from {start_from})")
-    for i, rf in enumerate(round_files):
+    for i, (rf, rc) in enumerate(round_configs):
         n = i + 1
-        rc = parse_frontmatter(rf)
-        rc = apply_config_overrides(rc, config)
         marker = ""
         if n < start_from:
             marker = " (skip)"
@@ -1515,12 +1593,10 @@ def pipeline(
 
     if dry_run:
         # Show dry-run details per round
-        for i, rf in enumerate(round_files):
+        for i, (rf, rc) in enumerate(round_configs):
             n = i + 1
             if n < start_from:
                 continue
-            rc = parse_frontmatter(rf)
-            rc = apply_config_overrides(rc, config)
             prompt = get_round_prompt(rf)
             prompt = apply_config_prompt_append(rc.name, prompt, config)
 
@@ -1553,9 +1629,8 @@ def pipeline(
     pipeline_start = time.time()
     results: list[RoundResult] = []
 
-    for i, rf in enumerate(round_files):
+    for i, (rf, rc) in enumerate(round_configs):
         n = i + 1
-        rc = parse_frontmatter(rf)
 
         if n < start_from:
             results.append(RoundResult(rc.name, RoundOutcome.SKIPPED))
