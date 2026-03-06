@@ -68,7 +68,7 @@ class PipelineCleanup:
         except (ValueError, OSError, TypeError, AttributeError):
             pass
 
-        if self.monitor and hasattr(self.monitor, "stop"):
+        if self.monitor:
             self.monitor.stop()
         for f in self.temp_files:
             f.unlink(missing_ok=True)

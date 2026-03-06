@@ -68,7 +68,7 @@ def _print_round_header(round_num: int, total: int, rc: RoundConfig) -> None:
 
 def _check_review_verdict(verdict: str | None, rc: RoundConfig) -> RoundOutcome:
     """Map a reviewer verdict + review_gate config to a round outcome."""
-    if verdict is None or verdict != "critical" or rc.review_gate == "none":
+    if verdict != "critical" or rc.review_gate == "none":
         return RoundOutcome.PASSED
     C.err(
         f"Reviewer found CRITICAL issues (review_gate={rc.review_gate}) "
@@ -470,7 +470,7 @@ def pipeline(
             marker = " (skip)"
         elif n == start_from:
             marker = " \u2190 start"
-        review_str = str(rc.review).lower() if rc.review is not None else "false"
+        review_str = str(rc.review).lower()
         analyzers_str = rc.analyzers or "none"
         C.log(
             f"  {n}. {rc.name} [${rc.max_budget_usd:.2f}, {rc.max_time_minutes}m] "
@@ -499,10 +499,7 @@ def pipeline(
                 if "review" in ov:
                     review_status = f"{str(ov['review']).lower()} (config)"
                 else:
-                    review_status = (
-                        f"{str(rc.review).lower() if rc.review is not None else 'false'} "
-                        f"(frontmatter)"
-                    )
+                    review_status = f"{str(rc.review).lower()} (frontmatter)"
             analyzers_status = rc.analyzers or "none"
             C.log(f"[DRY RUN] Would run claude -p with {len(prompt)} chars of prompt")
             C.log(f"[DRY RUN] Would run tests: {effective_test_cmd}")

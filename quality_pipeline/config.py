@@ -212,11 +212,6 @@ def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConf
     Priority (highest first): per-round override > frontmatter > global config > default.
     """
     ov = _find_override(rc.name, config)
-
-    # Nothing to apply — no globals set and no per-round overrides
-    if not ov and config.max_budget_usd is None and config.max_time_minutes is None:
-        return _finalize_round_config(rc)
-
     rc = replace(rc)
 
     # Per-round overrides (highest priority), then global config for unset fields
