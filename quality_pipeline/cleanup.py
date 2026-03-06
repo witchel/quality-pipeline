@@ -10,9 +10,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .output import C
 from .config import ENV_FILES
+
+if TYPE_CHECKING:
+    from .monitoring import ResourceMonitor
 
 
 class PipelineCleanup:
@@ -24,7 +28,7 @@ class PipelineCleanup:
         self.original_dir: Path | None = None
         self.symlink_dirs: list[str] = []
         self.lock_dir: Path | None = None
-        self.monitor: object | None = None  # ResourceMonitor, but avoid circular import
+        self.monitor: ResourceMonitor | None = None
         self.current_round: str = ""
         self.worktree_mode: bool = False
         self._activated: bool = False
