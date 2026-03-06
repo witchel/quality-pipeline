@@ -174,6 +174,26 @@ def git(*args: str, capture: bool = True, check: bool = True) -> subprocess.Comp
     )
 
 
+def _kill_process_group(proc: subprocess.Popen, graceful_wait: float = 2.0) -> None:
+    """Kill a process and its entire process group.
+
+    Requires the process to have been started with ``start_new_session=True``
+    so it has its own process group.  Sends SIGTERM first, then SIGKILL if
+    the process doesn't exit within *graceful_wait* seconds.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=graceful_wait)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Resource monitoring
 # ---------------------------------------------------------------------------
@@ -938,17 +958,32 @@ def run_tests_with_tee(
 
     If *timeout_seconds* > 0, the test process is killed after that many
     seconds and exit code ``-1`` is returned.
+
+    The child is started in its own session/process-group so that the
+    timeout can kill the entire tree, and ``stdbuf -oL`` (or macOS
+    ``gstdbuf``) is prepended when available to force line-buffered output
+    from the child — otherwise libc block-buffers when stdout is a pipe.
     """
     timed_out = False
+
+    # Force line-buffered stdout from the child process.  Without this,
+    # libc detects a pipe and block-buffers (typically 4-8 KB), so test
+    # output appears in delayed bursts rather than line-by-line.
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"  # covers pytest and most Python runners
+    for stdbuf in ("stdbuf", "gstdbuf"):
+        if shutil.which(stdbuf):
+            cmd = f"{stdbuf} -oL {cmd}"
+            break
 
     def _kill_on_timeout() -> None:
         nonlocal timed_out
         timed_out = True
-        proc.kill()
+        _kill_process_group(proc)
 
     proc = subprocess.Popen(
         cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1,
+        text=True, bufsize=1, start_new_session=True, env=env,
     )
     timer: threading.Timer | None = None
     if timeout_seconds > 0:
@@ -963,7 +998,7 @@ def run_tests_with_tee(
                     fout.write(line)
         proc.wait()
     except BaseException:
-        proc.kill()
+        _kill_process_group(proc)
         proc.wait()
         raise
     finally:
@@ -1015,11 +1050,11 @@ def run_claude(
     def _kill_on_timeout() -> None:
         nonlocal timed_out
         timed_out = True
-        proc.kill()
+        _kill_process_group(proc)
 
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1, env=env,
+        text=True, bufsize=1, env=env, start_new_session=True,
     )
     timer: threading.Timer | None = None
     if timeout_secs is not None:
@@ -1042,10 +1077,10 @@ def run_claude(
                 for line in proc.stdout:
                     fout.write(line)
 
-            t.join()
+            t.join(timeout=5)
             proc.wait()
     except BaseException:
-        proc.kill()
+        _kill_process_group(proc)
         proc.wait()
         raise
     finally:
@@ -1123,6 +1158,14 @@ def run_reviewer(
     review_output = log_dir / f"review-round-{round_num}.json"
 
     # Invoke claude for review (tee stderr to terminal for progress)
+    review_timeout_minutes = 10
+    review_timed_out = False
+
+    def _kill_reviewer_on_timeout() -> None:
+        nonlocal review_timed_out
+        review_timed_out = True
+        _kill_process_group(rev_proc)
+
     cmd = [
         "claude", "-p", review_prompt,
         "--dangerously-skip-permissions",
@@ -1132,8 +1175,12 @@ def run_reviewer(
     ]
     rev_proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1, env=_claude_env(),
+        text=True, bufsize=1, env=_claude_env(), start_new_session=True,
     )
+    rev_timer = threading.Timer(
+        review_timeout_minutes * 60, _kill_reviewer_on_timeout,
+    )
+    rev_timer.start()
     try:
         with review_output.open("w") as fout:
             def _tee_rev_stderr() -> None:
@@ -1147,12 +1194,18 @@ def run_reviewer(
             if rev_proc.stdout is not None:
                 for line in rev_proc.stdout:
                     fout.write(line)
-            rt.join()
+            rt.join(timeout=5)
             rev_proc.wait()
     except BaseException:
-        rev_proc.kill()
+        _kill_process_group(rev_proc)
         rev_proc.wait()
         raise
+    finally:
+        rev_timer.cancel()
+
+    if review_timed_out:
+        C.warn(f"Reviewer timed out after {review_timeout_minutes}m — skipping review")
+        return None
     C.log(f"Reviewer claude finished (exit {rev_proc.returncode})")
 
     verdict = _parse_verdict(review_output.read_text())
