@@ -910,7 +910,8 @@ def setup_worktree(
 def run_tests_with_tee(cmd: str, output_file: Path) -> int:
     """Run tests, teeing output to both stdout and a file. Returns exit code."""
     proc = subprocess.Popen(
-        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
     )
     try:
         with output_file.open("w") as fout:
@@ -944,6 +945,9 @@ def run_claude(
 ) -> int:
     """Invoke claude -p and capture output to log. Returns exit code.
 
+    Stderr (progress messages) is tee'd to the terminal so the user can see
+    activity.  Stdout (JSON result) is captured only to the log file.
+
     If *timeout_minutes* > 0, the subprocess is killed after that many minutes
     and a non-zero exit code (``-1``) is returned.
     """
@@ -957,19 +961,55 @@ def run_claude(
     ]
     env = _claude_env()
     timeout_secs = timeout_minutes * 60 if timeout_minutes > 0 else None
-    with log_file.open("w") as fout:
-        try:
-            result = subprocess.run(
-                cmd, stdout=fout, stderr=subprocess.STDOUT, check=False,
-                timeout=timeout_secs, env=env,
-            )
-        except subprocess.TimeoutExpired:
-            C.err(
-                f"Claude timed out after {timeout_minutes} minutes — "
-                f"increase max_time_minutes if the round needs more time"
-            )
-            return -1
-    return result.returncode
+    timed_out = False
+
+    def _kill_on_timeout() -> None:
+        nonlocal timed_out
+        timed_out = True
+        proc.kill()
+
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1, env=env,
+    )
+    timer: threading.Timer | None = None
+    if timeout_secs is not None:
+        timer = threading.Timer(timeout_secs, _kill_on_timeout)
+        timer.start()
+    try:
+        with log_file.open("w") as fout:
+            # Tee stderr (progress) to terminal + log; capture stdout (JSON) to log only
+            def _tee_stderr() -> None:
+                assert proc.stderr is not None
+                for line in proc.stderr:
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
+                    fout.write(line)
+
+            t = threading.Thread(target=_tee_stderr, daemon=True)
+            t.start()
+
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    fout.write(line)
+
+            t.join()
+            proc.wait()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        if timer is not None:
+            timer.cancel()
+
+    if timed_out:
+        C.err(
+            f"Claude timed out after {timeout_minutes} minutes — "
+            f"increase max_time_minutes if the round needs more time"
+        )
+        return -1
+    return proc.returncode
 
 
 def _parse_verdict(raw: str) -> str:
@@ -1033,7 +1073,7 @@ def run_reviewer(
     review_prompt = template_file.read_text().replace("DIFF_PLACEHOLDER", diff_content)
     review_output = log_dir / f"review-round-{round_num}.json"
 
-    # Invoke claude for review
+    # Invoke claude for review (tee stderr to terminal for progress)
     cmd = [
         "claude", "-p", review_prompt,
         "--dangerously-skip-permissions",
@@ -1041,11 +1081,30 @@ def run_reviewer(
         "--max-turns", "5",
         "--output-format", "json",
     ]
-    with review_output.open("w") as fout:
-        result = subprocess.run(
-            cmd, stdout=fout, stderr=subprocess.STDOUT, check=False, env=_claude_env(),
-        )
-    C.log(f"Reviewer claude finished (exit {result.returncode})")
+    rev_proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1, env=_claude_env(),
+    )
+    try:
+        with review_output.open("w") as fout:
+            def _tee_rev_stderr() -> None:
+                assert rev_proc.stderr is not None
+                for line in rev_proc.stderr:
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
+
+            rt = threading.Thread(target=_tee_rev_stderr, daemon=True)
+            rt.start()
+            if rev_proc.stdout is not None:
+                for line in rev_proc.stdout:
+                    fout.write(line)
+            rt.join()
+            rev_proc.wait()
+    except BaseException:
+        rev_proc.kill()
+        rev_proc.wait()
+        raise
+    C.log(f"Reviewer claude finished (exit {rev_proc.returncode})")
 
     verdict = _parse_verdict(review_output.read_text())
 

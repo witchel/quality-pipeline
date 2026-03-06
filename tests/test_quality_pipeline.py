@@ -1084,10 +1084,15 @@ class TestRunReviewer:
         )
         monkeypatch.setattr(qp, "TEMPLATE_DIR", tmp_path)
         (tmp_path / "reviewer.md").write_text("Review: DIFF_PLACEHOLDER")
-        monkeypatch.setattr(
-            subprocess, "run",
-            lambda *a, **kw: MagicMock(returncode=0),
-        )
+        def mock_popen(*args, **kwargs):
+            proc = MagicMock()
+            proc.stdout = io.StringIO('{"verdict": "pass"}')
+            proc.stderr = io.StringIO("")
+            proc.returncode = 0
+            proc.wait.return_value = 0
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
         qp.run_reviewer(
@@ -1127,14 +1132,15 @@ class TestRunReviewer:
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
 
-        def mock_subprocess_run(*args, **kwargs):
-            # Write the verdict to the output file that run_reviewer opens
-            stdout_file = kwargs.get("stdout")
-            if stdout_file and hasattr(stdout_file, "write"):
-                stdout_file.write(verdict_json)
-            return MagicMock(returncode=0)
+        def mock_popen(*args, **kwargs):
+            proc = MagicMock()
+            proc.stdout = io.StringIO(verdict_json)
+            proc.stderr = io.StringIO("")
+            proc.returncode = 0
+            proc.wait.return_value = 0
+            return proc
 
-        monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
         qp.run_reviewer(1, self._make_rc(), "abc", log_dir, None)
         return log_dir
 
@@ -1188,41 +1194,58 @@ class TestRunReviewer:
 
 
 class TestRunClaude:
+    @staticmethod
+    def _mock_popen(returncode=0):
+        def factory(*args, **kwargs):
+            proc = MagicMock()
+            proc.stdout = io.StringIO("")
+            proc.stderr = io.StringIO("")
+            proc.returncode = returncode
+            proc.wait.return_value = returncode
+            proc.kill.return_value = None
+            factory.last_cmd = args[0] if args else kwargs.get("args")
+            return proc
+        factory.last_cmd = None
+        return factory
+
     def test_returns_exit_code(self, tmp_path, monkeypatch):
         log_file = tmp_path / "claude.log"
-        monkeypatch.setattr(
-            subprocess, "run",
-            lambda *a, **kw: MagicMock(returncode=0),
-        )
+        monkeypatch.setattr(subprocess, "Popen", self._mock_popen(0))
         code = qp.run_claude("prompt", "ctx", 5.0, 20, log_file)
         assert code == 0
 
     def test_returns_nonzero(self, tmp_path, monkeypatch):
         log_file = tmp_path / "claude.log"
-        monkeypatch.setattr(
-            subprocess, "run",
-            lambda *a, **kw: MagicMock(returncode=1),
-        )
+        monkeypatch.setattr(subprocess, "Popen", self._mock_popen(1))
         code = qp.run_claude("prompt", "ctx", 5.0, 20, log_file)
         assert code == 1
 
     def test_passes_budget_and_turns(self, tmp_path, monkeypatch):
         log_file = tmp_path / "claude.log"
-        captured_cmd = []
-        def mock_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
-            return MagicMock(returncode=0)
-        monkeypatch.setattr(subprocess, "run", mock_run)
+        mock = self._mock_popen(0)
+        monkeypatch.setattr(subprocess, "Popen", mock)
         qp.run_claude("prompt", "ctx", 3.50, 10, log_file)
-        assert "3.50" in captured_cmd
-        assert "10" in captured_cmd
+        assert "3.50" in mock.last_cmd
+        assert "10" in mock.last_cmd
 
     def test_timeout_returns_negative_one(self, tmp_path, monkeypatch):
         log_file = tmp_path / "claude.log"
-        def mock_run(*a, **kw):
-            raise subprocess.TimeoutExpired(cmd="claude", timeout=60)
-        monkeypatch.setattr(subprocess, "run", mock_run)
-        code = qp.run_claude("prompt", "ctx", 5.0, 20, log_file, timeout_minutes=1)
+        import threading as _threading
+
+        class InstantTimer:
+            """Timer that calls its callback immediately on start()."""
+            def __init__(self, interval, function):
+                self._fn = function
+            def start(self):
+                self._fn()
+            def cancel(self):
+                pass
+
+        monkeypatch.setattr(_threading, "Timer", InstantTimer)
+        monkeypatch.setattr(subprocess, "Popen", self._mock_popen(-9))
+        code = qp.run_claude(
+            "prompt", "ctx", 5.0, 20, log_file, timeout_minutes=1,
+        )
         assert code == -1
 
 
