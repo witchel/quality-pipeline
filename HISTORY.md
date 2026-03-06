@@ -88,3 +88,36 @@ The `run_round` function was split into a thin wrapper (try/finally to guarantee
 every exit path had to remember to clear `current_round` — five copies of the
 same line, and any exception escaping would skip them all, leaving a confusing
 "Interrupted during round: X" message in the cleanup handler.
+
+---
+
+## 2026-03-05 — Split quality_pipeline.py into a package
+
+The single-file `scripts/quality_pipeline.py` grew to 1814 lines — it mixed
+output formatting, config resolution, git operations, subprocess management,
+resource monitoring, cleanup, and pipeline orchestration in one module. Reading
+one section required scrolling past 12 others, and monkeypatch targets in tests
+were all `qp.<name>` regardless of which subsystem they belonged to.
+
+Split into `scripts/quality_pipeline/` with nine focused modules following a
+strict dependency DAG (no cycles):
+
+- **output.py** — `ColorOutput`, `C` singleton, `format_duration`, `gate_label`
+- **config.py** — constants, dataclasses, frontmatter parsing, overrides, round discovery
+- **monitoring.py** — GPU detection, resource snapshots, `ResourceMonitor` thread
+- **detection.py** — test command auto-detection, static analysis runner
+- **git_ops.py** — `git()` helper, all `git_*` functions, worktree setup
+- **cleanup.py** — `PipelineCleanup`, signal handlers
+- **process.py** — `run_tests_with_tee`, `run_claude`, `run_reviewer`
+- **pipeline.py** — `run_round`, `_execute_round`, `pipeline()` orchestrator
+- **\_\_main\_\_.py** — click CLI entry point
+
+A thin `scripts/quality_pipeline_cli.py` wrapper preserves the `uv run --script`
+invocation (PEP 723 only works on single files). The `__init__.py` re-exports
+every public and tested name, so `import quality_pipeline as qp` still works.
+
+The hardest part was migrating monkeypatch targets: `from .git_ops import git` in
+`pipeline.py` binds `git` in pipeline's namespace, so `monkeypatch.setattr(qp,
+"git", mock)` no longer affects the code. Every test patch was remapped to the
+consuming module (e.g., `qp.pipeline_mod.git`, `qp.process.TEMPLATE_DIR`,
+`qp.git_ops.git`). All 171 tests pass with the new structure.

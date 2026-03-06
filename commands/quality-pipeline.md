@@ -37,7 +37,7 @@ Rounds interact exclusively through git state — each round starts a fresh Clau
 Run the quality pipeline orchestration script. Execute it like this:
 
 ```bash
-uv run "$PLUGIN_DIR/scripts/quality_pipeline.py" $ARGUMENTS
+uv run "$PLUGIN_DIR/scripts/quality_pipeline_cli.py" $ARGUMENTS
 ```
 
 Where `$PLUGIN_DIR` is the directory containing this plugin (the parent of `commands/`) and `$ARGUMENTS` are the arguments the user passed to this command.
