@@ -56,7 +56,7 @@ def run_tests_with_tee(
     ``gstdbuf``) is prepended when available to force line-buffered output
     from the child — otherwise libc block-buffers when stdout is a pipe.
     """
-    timed_out = False
+    timed_out = threading.Event()
 
     # Force line-buffered stdout from the child process.  Without this,
     # libc detects a pipe and block-buffers (typically 4-8 KB), so test
@@ -69,8 +69,7 @@ def run_tests_with_tee(
             break
 
     def _kill_on_timeout() -> None:
-        nonlocal timed_out
-        timed_out = True
+        timed_out.set()
         _kill_process_group(proc)
 
     proc = subprocess.Popen(
@@ -97,7 +96,7 @@ def run_tests_with_tee(
         if timer is not None:
             timer.cancel()
 
-    if timed_out:
+    if timed_out.is_set():
         C.err(f"Tests timed out after {timeout_seconds}s")
         return -1
     return proc.returncode
@@ -126,11 +125,10 @@ def _run_claude_process(
     """
     env = _claude_env()
     timeout_secs = timeout_minutes * 60 if timeout_minutes > 0 else None
-    timed_out = False
+    timed_out = threading.Event()
 
     def _kill_on_timeout() -> None:
-        nonlocal timed_out
-        timed_out = True
+        timed_out.set()
         _kill_process_group(proc)
 
     proc = subprocess.Popen(
@@ -168,7 +166,7 @@ def _run_claude_process(
         if stderr_thread is not None:
             stderr_thread.join(timeout=5)
 
-    return proc.returncode, timed_out
+    return proc.returncode, timed_out.is_set()
 
 
 def run_claude(
