@@ -4,12 +4,87 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import signal
 import subprocess
+import threading
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import quality_pipeline as qp
 from conftest import _mock_git_fn
+
+
+class TestKillProcessGroup:
+    def test_skips_invalid_pid_zero(self):
+        proc = MagicMock()
+        proc.pid = 0
+        with patch.object(os, "killpg") as mock_killpg:
+            qp._kill_process_group(proc)
+            mock_killpg.assert_not_called()
+
+    def test_skips_invalid_pid_negative(self):
+        proc = MagicMock()
+        proc.pid = -1
+        with patch.object(os, "killpg") as mock_killpg:
+            qp._kill_process_group(proc)
+            mock_killpg.assert_not_called()
+
+    def test_skips_pid_none(self):
+        proc = MagicMock()
+        proc.pid = None
+        with patch.object(os, "killpg") as mock_killpg:
+            qp._kill_process_group(proc)
+            mock_killpg.assert_not_called()
+
+    def test_sends_sigterm(self):
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.wait.return_value = 0
+        with patch.object(os, "killpg") as mock_killpg:
+            qp._kill_process_group(proc)
+            mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
+
+    def test_escalates_to_sigkill_on_timeout(self):
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.wait.side_effect = subprocess.TimeoutExpired("cmd", 2)
+        with patch.object(os, "killpg") as mock_killpg:
+            qp._kill_process_group(proc, graceful_wait=0.01)
+            calls = mock_killpg.call_args_list
+            assert calls[0] == ((12345, signal.SIGTERM),)
+            assert calls[1] == ((12345, signal.SIGKILL),)
+
+    def test_handles_oserror_on_sigterm(self):
+        proc = MagicMock()
+        proc.pid = 12345
+        with patch.object(os, "killpg", side_effect=OSError("no such process")):
+            qp._kill_process_group(proc)  # should not raise
+
+    def test_handles_oserror_on_sigkill(self):
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.wait.side_effect = subprocess.TimeoutExpired("cmd", 2)
+        effects = [None, OSError("no such process")]
+        with patch.object(os, "killpg", side_effect=effects):
+            qp._kill_process_group(proc, graceful_wait=0.01)  # should not raise
+
+
+class TestClaudeEnv:
+    def test_strips_claudecode_vars(self, monkeypatch):
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "/bin/claude")
+        monkeypatch.setenv("HOME", "/home/test")
+        env = qp._claude_env()
+        assert "CLAUDECODE" not in env
+        assert "CLAUDE_CODE_ENTRYPOINT" not in env
+        assert env["HOME"] == "/home/test"
+
+    def test_preserves_env_when_vars_absent(self, monkeypatch):
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+        env = qp._claude_env()
+        assert "CLAUDECODE" not in env
 
 
 class TestRunTestsWithTee:
@@ -231,3 +306,92 @@ class TestRunReviewer:
         self._run_reviewer_with_verdict(tmp_path, monkeypatch, verdict)
         out = capsys.readouterr().out
         assert "WARN" in out
+
+    def test_returns_verdict_string(self, tmp_path, monkeypatch):
+        """run_reviewer should return the verdict string."""
+        monkeypatch.setattr(
+            qp.process, "git", _mock_git_fn(stdout="diff content\n"),
+        )
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "reviewer.md").write_text("Review: DIFF_PLACEHOLDER")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        def mock_popen(*args, **kwargs):
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO(json.dumps({"verdict": "critical"}))
+            proc.stderr = io.StringIO("")
+            proc.returncode = 0
+            proc.wait.return_value = 0
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        result = qp.run_reviewer(
+            1, qp.RoundConfig(name="test", review=True), "abc", log_dir, None,
+        )
+        assert result == "critical"
+
+    def test_diff_truncation(self, tmp_path, monkeypatch):
+        """Large diffs should be truncated to 8000 chars."""
+        big_diff = "x" * 10000
+        monkeypatch.setattr(
+            qp.process, "git", _mock_git_fn(stdout=big_diff),
+        )
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "reviewer.md").write_text("Review: DIFF_PLACEHOLDER")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        captured_prompt = []
+        def mock_popen(cmd, **kwargs):
+            captured_prompt.append(cmd)
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO(json.dumps({"verdict": "pass"}))
+            proc.stderr = io.StringIO("")
+            proc.returncode = 0
+            proc.wait.return_value = 0
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        qp.run_reviewer(
+            1, qp.RoundConfig(name="test", review=True), "abc", log_dir, None,
+        )
+        # The prompt should contain the truncation message
+        prompt = captured_prompt[0][2]  # claude -p <prompt>
+        assert "truncated" in prompt
+
+    def test_timeout_returns_none(self, tmp_path, monkeypatch):
+        """Reviewer timeout should return None."""
+        monkeypatch.setattr(
+            qp.process, "git", _mock_git_fn(stdout="diff content\n"),
+        )
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "reviewer.md").write_text("Review: DIFF_PLACEHOLDER")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        class InstantTimer:
+            def __init__(self, interval, function):
+                self._fn = function
+            def start(self):
+                self._fn()
+            def cancel(self):
+                pass
+
+        monkeypatch.setattr(threading, "Timer", InstantTimer)
+        def mock_popen(*args, **kwargs):
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO("")
+            proc.stderr = io.StringIO("")
+            proc.returncode = -9
+            proc.wait.return_value = -9
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        result = qp.run_reviewer(
+            1, qp.RoundConfig(name="test", review=True), "abc", log_dir, None,
+        )
+        assert result is None

@@ -59,7 +59,7 @@ class PipelineCleanup:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             if hasattr(signal, "SIGHUP"):
                 signal.signal(signal.SIGHUP, signal.SIG_IGN)
-        except (ValueError, OSError, TypeError):
+        except (ValueError, OSError, TypeError, AttributeError):
             pass
 
         if self.monitor and hasattr(self.monitor, "stop"):

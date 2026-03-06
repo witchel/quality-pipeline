@@ -84,13 +84,14 @@ def run_round(
     review_flag: bool | None,
     log_dir: Path,
     gpu_type: str,
+    rc: RoundConfig | None = None,
 ) -> RoundOutcome:
     """Execute a single pipeline round. Returns the outcome."""
     round_start = time.time()
     pre_sha = git_rev_parse_head()
 
-    rc = parse_frontmatter(round_file)
-    rc = apply_config_overrides(rc, config)
+    if rc is None:
+        rc = apply_config_overrides(parse_frontmatter(round_file), config)
     _cleanup.current_round = rc.name
     try:
         return _execute_round(
@@ -520,7 +521,8 @@ def pipeline(
             continue
 
         outcome = run_round(
-            rf, n, total, effective_test_cmd, config, review_flag, log_dir, gpu_type
+            rf, n, total, effective_test_cmd, config, review_flag, log_dir, gpu_type,
+            rc=rc,
         )
 
         results.append(RoundResult(rc.name, outcome))
@@ -572,7 +574,7 @@ def pipeline(
     print()
     C.log(f"{C.BOLD}Log directory: {log_dir}{C.NC}")
     for lf in sorted(log_dir.glob("*")):
-        if lf.suffix in (".log", ".json"):
+        if lf.suffix in (".log", ".json", ".txt"):
             C.log(f"  {lf}")
     C.log("\u2501" * 60)
 

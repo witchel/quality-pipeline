@@ -143,7 +143,6 @@ class ResourceMonitor:
         self._stop = threading.Event()
         self._interval = interval
         self._gpu_type = gpu_type
-        self._round_name = round_name
         self._start_epoch = start_epoch
         self._thread = threading.Thread(target=self._run, daemon=True)
 

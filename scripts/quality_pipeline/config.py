@@ -14,8 +14,7 @@ from .output import C
 # Constants
 # ---------------------------------------------------------------------------
 
-SCRIPT_DIR = Path(__file__).resolve().parent.parent
-PLUGIN_DIR = SCRIPT_DIR.parent
+PLUGIN_DIR = Path(__file__).resolve().parent.parent.parent
 ROUNDS_DIR = PLUGIN_DIR / "rounds"
 TEMPLATE_DIR = PLUGIN_DIR / "templates"
 

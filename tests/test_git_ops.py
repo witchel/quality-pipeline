@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -196,3 +198,105 @@ class TestGitRevParseHead:
     def test_returns_sha(self, monkeypatch):
         monkeypatch.setattr(qp.git_ops, "git", _mock_git_fn(stdout="abc123\n"))
         assert qp.git_rev_parse_head() == "abc123"
+
+
+class TestSetupWorktree:
+    @staticmethod
+    def _setup_worktree_mocks(monkeypatch, calls, wt_path, branch_exists=False):
+        """Set up mocks for setup_worktree tests.
+
+        Creates wt_path so mkdtemp/rmdir cycle works, and mocks git to
+        recreate it on 'worktree add' (simulating real git behavior).
+        """
+        def mock_git(*args, **kwargs):
+            calls.append(args)
+            r = MagicMock()
+            if "show-ref" in args:
+                r.returncode = 0 if branch_exists else 1
+            else:
+                r.returncode = 0
+            if "worktree" in args and "add" in args:
+                wt_path.mkdir(exist_ok=True)
+            return r
+
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+
+        # mkdtemp must create the dir (like the real one does) so rmdir() works
+        def mock_mkdtemp(prefix=""):
+            wt_path.mkdir(exist_ok=True)
+            return str(wt_path)
+
+        monkeypatch.setattr("tempfile.mkdtemp", mock_mkdtemp)
+
+    def test_new_branch_calls_worktree_add_b(self, tmp_path, monkeypatch):
+        """When branch doesn't exist, use 'git worktree add -b'."""
+        orig_dir = tmp_path / "orig"
+        orig_dir.mkdir()
+        monkeypatch.chdir(orig_dir)
+
+        calls = []
+        wt_path = tmp_path / "worktree-dir"
+        self._setup_worktree_mocks(monkeypatch, calls, wt_path, branch_exists=False)
+
+        wt_dir, original_dir = qp.setup_worktree("quality/test", [])
+        assert original_dir == orig_dir
+        wt_calls = [c for c in calls if "worktree" in c]
+        assert any("-b" in c for c in wt_calls)
+
+    def test_existing_branch_calls_worktree_add_without_b(self, tmp_path, monkeypatch):
+        """When branch exists, use 'git worktree add' without -b."""
+        orig_dir = tmp_path / "orig"
+        orig_dir.mkdir()
+        monkeypatch.chdir(orig_dir)
+
+        calls = []
+        wt_path = tmp_path / "worktree-dir"
+        self._setup_worktree_mocks(monkeypatch, calls, wt_path, branch_exists=True)
+
+        qp.setup_worktree("quality/test", [])
+        wt_calls = [c for c in calls if "worktree" in c]
+        assert not any("-b" in c for c in wt_calls)
+
+    def test_symlinks_dirs(self, tmp_path, monkeypatch):
+        """Existing dirs in original should be symlinked into worktree."""
+        orig_dir = tmp_path / "orig"
+        orig_dir.mkdir()
+        (orig_dir / "node_modules").mkdir()
+        monkeypatch.chdir(orig_dir)
+
+        calls = []
+        wt_path = tmp_path / "worktree-dir"
+        self._setup_worktree_mocks(monkeypatch, calls, wt_path)
+
+        qp.setup_worktree("quality/test", ["node_modules"])
+        link = wt_path / "node_modules"
+        assert link.is_symlink()
+        assert link.resolve() == (orig_dir / "node_modules").resolve()
+
+    def test_symlinks_env_files(self, tmp_path, monkeypatch):
+        """Existing .env files should be symlinked."""
+        orig_dir = tmp_path / "orig"
+        orig_dir.mkdir()
+        (orig_dir / ".env").write_text("SECRET=val")
+        monkeypatch.chdir(orig_dir)
+
+        calls = []
+        wt_path = tmp_path / "worktree-dir"
+        self._setup_worktree_mocks(monkeypatch, calls, wt_path)
+
+        qp.setup_worktree("quality/test", [])
+        link = wt_path / ".env"
+        assert link.is_symlink()
+
+    def test_changes_cwd(self, tmp_path, monkeypatch):
+        """setup_worktree should chdir to the worktree."""
+        orig_dir = tmp_path / "orig"
+        orig_dir.mkdir()
+        monkeypatch.chdir(orig_dir)
+
+        calls = []
+        wt_path = tmp_path / "worktree-dir"
+        self._setup_worktree_mocks(monkeypatch, calls, wt_path)
+
+        qp.setup_worktree("quality/test", [])
+        assert Path.cwd() == wt_path

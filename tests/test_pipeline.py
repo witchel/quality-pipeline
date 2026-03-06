@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -157,6 +158,66 @@ class TestRunRound:
         )
         assert result == qp.RoundOutcome.SOFT_FAILED
         assert len(rolled_back) == 1
+
+
+class TestRemainingSeconds:
+    def test_time_remaining(self):
+        start = time.time() - 120  # 2 minutes ago
+        result = qp.pipeline_mod._remaining_seconds(start, 5)
+        # Should be ~3 minutes = ~180 seconds
+        assert 170 <= result <= 190
+
+    def test_budget_exhausted(self):
+        start = time.time() - 600  # 10 minutes ago
+        result = qp.pipeline_mod._remaining_seconds(start, 5)
+        assert result < 0
+
+
+class TestRunRoundReviewerVerdict:
+    """Test that reviewer critical verdict downgrades run_round outcome."""
+
+    @pytest.fixture
+    def round_file(self, tmp_path):
+        f = tmp_path / "01-test.md"
+        f.write_text(
+            "---\nname: test-round\ngate: none\nreview_gate: hard\n---\nDo stuff.\n"
+        )
+        return f
+
+    @pytest.fixture
+    def log_dir(self, tmp_path):
+        d = tmp_path / "logs"
+        d.mkdir()
+        return d
+
+    @pytest.fixture
+    def mock_env(self, monkeypatch):
+        monkeypatch.setattr(qp.pipeline_mod, "git_rev_parse_head", lambda: "abc123")
+        monkeypatch.setattr(qp.pipeline_mod, "git_untracked_files", lambda: set())
+        monkeypatch.setattr(
+            qp.pipeline_mod, "get_resource_snapshot", lambda gpu_type="none": "CPU: ok"
+        )
+        monkeypatch.setattr(
+            qp.pipeline_mod, "run_static_analysis", lambda *a, **kw: ""
+        )
+        monkeypatch.setattr(qp.pipeline_mod, "git_stage_round_changes", lambda pre: None)
+        monkeypatch.setattr(qp.pipeline_mod, "git_commit", lambda msg: None)
+        monkeypatch.setattr(qp.ResourceMonitor, "start", lambda self: None)
+        monkeypatch.setattr(qp.ResourceMonitor, "stop", lambda self: None)
+
+    def test_critical_verdict_hard_gate_fails_round(
+        self, round_file, log_dir, mock_env, monkeypatch
+    ):
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 0)
+        # Simulate changes exist (gate=none skips tests, goes straight to commit+review)
+        monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
+        monkeypatch.setattr(
+            qp.pipeline_mod, "run_reviewer", lambda *a, **kw: "critical"
+        )
+        result = qp.run_round(
+            round_file, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
+        )
+        assert result == qp.RoundOutcome.HARD_FAILED
 
 
 class TestCheckReviewVerdict:
@@ -396,6 +457,58 @@ class TestPipeline:
             log_dir_arg=str(pipeline_env / "logs"),
         )
         assert call_count[0] == 2
+
+    def test_uncommitted_changes_exits(self, pipeline_env, monkeypatch):
+        monkeypatch.setattr(qp.pipeline_mod, "git_has_uncommitted", lambda: True)
+        with pytest.raises(SystemExit):
+            qp.pipeline(
+                project_dir=None,
+                rounds_arg=None,
+                config_file=None,
+                start_from=1,
+                dry_run=False,
+                worktree=False,
+                worktree_symlinks=None,
+                test_command="true",
+                review_flag=None,
+                log_dir_arg=str(pipeline_env / "logs"),
+            )
+
+    def test_hard_failure_stops_subsequent_rounds(
+        self, tmp_path, pipeline_env, monkeypatch
+    ):
+        """In a multi-round scenario, hard failure should stop execution."""
+        rounds_dir = tmp_path / "rounds"
+        (rounds_dir / "02-refactor.md").write_text(
+            "---\nname: refactor\ngate: hard\n---\nRefactor.\n"
+        )
+        (rounds_dir / "03-concurrency.md").write_text(
+            "---\nname: concurrency\ngate: hard\n---\nConcurrency.\n"
+        )
+        executed = []
+        def mock_run_round(rf, n, total, *args, **kwargs):
+            rc = qp.parse_frontmatter(rf)
+            executed.append(rc.name)
+            if rc.name == "refactor":
+                return qp.RoundOutcome.HARD_FAILED
+            return qp.RoundOutcome.PASSED
+        monkeypatch.setattr(qp.pipeline_mod, "run_round", mock_run_round)
+        with pytest.raises(SystemExit):
+            qp.pipeline(
+                project_dir=None,
+                rounds_arg=None,
+                config_file=None,
+                start_from=1,
+                dry_run=False,
+                worktree=False,
+                worktree_symlinks=None,
+                test_command="true",
+                review_flag=None,
+                log_dir_arg=str(pipeline_env / "logs"),
+            )
+        # Round 3 (concurrency) should never have been executed
+        assert "concurrency" not in executed
+        assert "refactor" in executed
 
     def test_config_file_loaded(self, tmp_path, pipeline_env, monkeypatch):
         cfg_file = tmp_path / "custom.yaml"

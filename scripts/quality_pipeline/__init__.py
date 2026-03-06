@@ -20,7 +20,6 @@ from .output import ColorOutput, C, format_duration, gate_label
 
 # --- config.py ---
 from .config import (
-    SCRIPT_DIR,
     PLUGIN_DIR,
     ROUNDS_DIR,
     TEMPLATE_DIR,

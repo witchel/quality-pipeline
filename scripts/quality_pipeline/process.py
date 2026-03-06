@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import shutil
@@ -24,6 +23,8 @@ def _kill_process_group(proc: subprocess.Popen, graceful_wait: float = 2.0) -> N
     so it has its own process group.  Sends SIGTERM first, then SIGKILL if
     the process doesn't exit within *graceful_wait* seconds.
     """
+    if proc.pid is None or proc.pid <= 0:
+        return
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except OSError:
