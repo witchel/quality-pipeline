@@ -49,6 +49,7 @@ class TestRunClaude:
     def _mock_popen(returncode=0):
         def factory(*args, **kwargs):
             proc = MagicMock()
+            proc.pid = -1  # invalid PID so os.killpg won't target real processes
             proc.stdout = io.StringIO("")
             proc.stderr = io.StringIO("")
             proc.returncode = returncode
@@ -128,6 +129,7 @@ class TestRunReviewer:
         (tmp_path / "reviewer.md").write_text("Review: DIFF_PLACEHOLDER")
         def mock_popen(*args, **kwargs):
             proc = MagicMock()
+            proc.pid = -1
             proc.stdout = io.StringIO('{"verdict": "pass"}')
             proc.stderr = io.StringIO("")
             proc.returncode = 0
@@ -176,6 +178,7 @@ class TestRunReviewer:
 
         def mock_popen(*args, **kwargs):
             proc = MagicMock()
+            proc.pid = -1
             proc.stdout = io.StringIO(verdict_json)
             proc.stderr = io.StringIO("")
             proc.returncode = 0
