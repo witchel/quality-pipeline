@@ -76,6 +76,9 @@ class PipelineCleanup:
                 self.lock_dir.rmdir()
             except OSError:
                 pass
+            # Remove sibling PID file used for stale lock detection
+            pid_file = self.lock_dir.parent / f"{self.lock_dir.name}.pid"
+            pid_file.unlink(missing_ok=True)
         # Save and clear current_round so repeated calls (signal + atexit)
         # don't print the interruption message twice.
         interrupted_round = self.current_round

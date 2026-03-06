@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
+from pathlib import Path
 
 
 class ColorOutput:
@@ -49,3 +52,40 @@ def format_duration(secs: int) -> str:
     if secs >= 60:
         return f"{secs // 60}m {secs % 60}s"
     return f"{secs}s"
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort fsync of a directory to persist renames."""
+    try:
+        dir_fd = os.open(str(path), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write text to a file atomically via write→fsync→rename→dir-fsync.
+
+    Writes to a temp file in the same directory, fsyncs, then renames.
+    The original file is never left truncated or partial.
+    """
+    parent = path.parent
+    fd, tmp_path = tempfile.mkstemp(
+        dir=parent, prefix=f".{path.name}.", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    _fsync_directory(parent)

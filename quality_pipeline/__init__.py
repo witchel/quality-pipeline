@@ -16,7 +16,7 @@ from . import pipeline as pipeline_mod  # noqa: F401
 from . import process as process  # noqa: F401
 
 # --- output.py ---
-from .output import ColorOutput as ColorOutput, C as C, format_duration as format_duration, gate_label as gate_label
+from .output import ColorOutput as ColorOutput, C as C, format_duration as format_duration, gate_label as gate_label, _fsync_directory as _fsync_directory, atomic_write_text as atomic_write_text
 
 # --- config.py ---
 from .config import (
@@ -64,6 +64,8 @@ from .git_ops import (
     git_create_branch as git_create_branch,
     git_commit as git_commit,
     git_acquire_lock as git_acquire_lock,
+    _lock_pid_path as _lock_pid_path,
+    _is_lock_stale as _is_lock_stale,
     setup_worktree as setup_worktree,
 )
 

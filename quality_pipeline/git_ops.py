@@ -90,19 +90,57 @@ def git_commit(msg: str) -> None:
     raise subprocess.CalledProcessError(result2.returncode, "git commit")
 
 
+def _lock_pid_path(lock_path: Path) -> Path:
+    """Return the sibling PID file path for a lock directory."""
+    return lock_path.parent / f"{lock_path.name}.pid"
+
+
+def _is_lock_stale(lock_path: Path) -> bool:
+    """Check if a lock directory holds a stale (dead process) lock.
+
+    Reads the sibling PID file and checks whether that process is alive.
+    Returns False (conservative) when the PID file is missing or unreadable.
+    """
+    pid_file = _lock_pid_path(lock_path)
+    try:
+        old_pid = int(pid_file.read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return False  # No PID file → can't determine, assume live
+    try:
+        os.kill(old_pid, 0)
+    except ProcessLookupError:
+        return True  # Process dead → stale
+    except (PermissionError, OSError):
+        pass  # Process exists → not stale
+    return False
+
+
 def git_acquire_lock(dry_run: bool) -> Path | None:
-    """Acquire a lock to prevent concurrent pipeline runs."""
+    """Acquire a lock to prevent concurrent pipeline runs.
+
+    Writes a sibling PID file so future runs can detect and reclaim
+    stale locks left by crashed processes (e.g. SIGKILL).
+    """
     if dry_run:
         return None
     git_dir = git("rev-parse", "--git-dir").stdout.strip()
     lock_path = Path(git_dir) / "quality-pipeline.lock"
+    pid_file = _lock_pid_path(lock_path)
     try:
         lock_path.mkdir()
-        return lock_path
     except FileExistsError:
-        C.err("Another pipeline is running in this repository.")
-        C.err(f"If stale, remove: rmdir '{lock_path}'")
-        sys.exit(1)
+        if _is_lock_stale(lock_path):
+            C.warn("Stale pipeline lock detected — reclaiming")
+            pid_file.unlink(missing_ok=True)
+            lock_path.rmdir()
+            lock_path.mkdir()
+        else:
+            C.err("Another pipeline is running in this repository.")
+            C.err(f"If stale, remove: rmdir '{lock_path}'")
+            sys.exit(1)
+    # Record PID for stale lock detection
+    pid_file.write_text(str(os.getpid()))
+    return lock_path
 
 
 def setup_worktree(

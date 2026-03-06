@@ -87,6 +87,8 @@ def run_tests_with_tee(
                     sys.stdout.write(line)
                     sys.stdout.flush()
                     fout.write(line)
+            fout.flush()
+            os.fsync(fout.fileno())
         proc.wait()
     except BaseException:
         _kill_process_group(proc)
@@ -155,6 +157,8 @@ def _run_claude_process(
                 for line in proc.stdout:
                     fout.write(line)
 
+            fout.flush()
+            os.fsync(fout.fileno())
             proc.wait()
     except BaseException:
         _kill_process_group(proc)

@@ -9,7 +9,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .output import C, format_duration, gate_label
+from .output import C, atomic_write_text, format_duration, gate_label
 from .config import (
     BRANCH_PREFIX_DEFAULT,
     DEFAULT_SYMLINK_DIRS,
@@ -150,7 +150,7 @@ def _execute_round(
     )
     if analysis_output:
         # Save to log dir for post-hoc debugging
-        (log_dir / f"analysis-round-{round_num}.txt").write_text(analysis_output)
+        atomic_write_text(log_dir / f"analysis-round-{round_num}.txt", analysis_output)
         prompt += (
             "\n\n## Static Analysis Results\n"
             "The following issues were found by static analysis tools. "
