@@ -14,9 +14,9 @@ from .output import C
 # Constants
 # ---------------------------------------------------------------------------
 
-PLUGIN_DIR = Path(__file__).resolve().parent.parent.parent
-ROUNDS_DIR = PLUGIN_DIR / "rounds"
-TEMPLATE_DIR = PLUGIN_DIR / "templates"
+_PACKAGE_DIR = Path(__file__).resolve().parent
+ROUNDS_DIR = _PACKAGE_DIR / "rounds"
+TEMPLATE_DIR = _PACKAGE_DIR / "templates"
 
 DEFAULT_SYMLINK_DIRS: list[str] = [
     "node_modules", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache",

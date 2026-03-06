@@ -1,36 +1,45 @@
 # Quality Pipeline
 
-A reusable, multi-round automated code quality tool for Claude Code. Runs sequential quality rounds (testing, refactoring, concurrency, fault tolerance, error handling, security, type safety, dead code elimination, dependency hygiene, simplification) with test verification and clean git commits.
+A multi-round automated code quality tool for Claude Code. Runs sequential quality rounds (testing, refactoring, concurrency, fault tolerance, error handling, security, type safety, dead code elimination, dependency hygiene, simplification) with test verification and clean git commits.
 
 ## Installation
 
 ```bash
-cd ~/.claude/plugins/
-git clone <repo-url> quality-pipeline
-```
+# Install as a CLI tool
+uv tool install /path/to/quality-pipeline
 
-The `/quality-pipeline` slash command is now available in any Claude Code session.
+# Or run directly from the repo
+uv run quality-pipeline --help
+```
 
 ## Usage
 
-### Interactive (Claude Code session)
-
-```
-/quality-pipeline
-/quality-pipeline --rounds "audit-tests dead-code"
-/quality-pipeline --start-from 3
-/quality-pipeline --dry-run
-```
-
-### Headless (terminal)
+From any git project directory:
 
 ```bash
-uv run ~/.claude/plugins/quality-pipeline/scripts/quality_pipeline.py \
-    --rounds "audit-tests refactor concurrency dead-code simplify" \
-    --test-command "npm test"
+# Run all rounds
+quality-pipeline
+
+# Preview the plan
+quality-pipeline --dry-run
+
+# Cherry-pick rounds
+quality-pipeline --rounds "audit-tests dead-code simplify"
+
+# Resume from round 3
+quality-pipeline --start-from 3
+
+# Safe with uncommitted changes
+quality-pipeline --worktree
 ```
 
-When invoked from within a Claude Code session (interactive or via the `/quality-pipeline` command), the pipeline automatically unsets `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` before spawning `claude -p` subprocesses, so they don't fail with a recursive-run detection error.
+Or without installing, using `uv run` from the quality-pipeline repo:
+
+```bash
+uv run quality-pipeline --project-dir /path/to/your/project
+```
+
+When invoked from within a Claude Code session, the pipeline automatically unsets `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` before spawning `claude -p` subprocesses, so they don't fail with a recursive-run detection error.
 
 ## Options
 
@@ -145,7 +154,7 @@ This means a round that explicitly sets `max_budget_usd: 3.00` in its frontmatte
 
 ## Custom Rounds
 
-Add a markdown file to `rounds/` with YAML frontmatter:
+Add a markdown file to `quality_pipeline/rounds/` with YAML frontmatter:
 
 ```markdown
 ---
@@ -191,6 +200,23 @@ The pipeline auto-detects your test runner by checking (in order):
 6. Cargo.toml → `cargo test`
 
 Override with `--test-command` or `test_command` in pipeline.yaml.
+
+## Self-Testing
+
+The pipeline can be run on its own codebase. Use `--worktree` so the orchestrator isn't modified mid-run:
+
+```bash
+# Preview
+uv run quality-pipeline --worktree --dry-run
+
+# Run all rounds
+uv run quality-pipeline --worktree
+
+# Cherry-pick rounds
+uv run quality-pipeline --worktree --rounds "audit-tests simplify"
+```
+
+Test auto-detection works because the repo now has a `pyproject.toml` with pytest configured.
 
 ## Failure Recovery
 

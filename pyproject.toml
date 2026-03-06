@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quality-pipeline"
+version = "0.1.0"
+description = "Multi-round automated code quality tool for Claude Code"
+requires-python = ">=3.10"
+dependencies = ["click>=8.0", "pyyaml>=6.0"]
+
+[project.scripts]
+quality-pipeline = "quality_pipeline.__main__:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["quality_pipeline"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = ["pytest>=7.0"]
