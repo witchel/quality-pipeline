@@ -36,7 +36,6 @@ DEFAULT_ANALYZERS: dict[str, str] = {
 MAX_ANALYSIS_OUTPUT = 4000
 
 VALID_GATES = {"hard", "soft", "none"}
-VALID_REVIEW_GATES = {"hard", "soft", "none"}
 
 _DEFAULT_MAX_BUDGET_USD = 5.00
 _DEFAULT_MAX_TURNS = 30
@@ -109,7 +108,8 @@ def parse_frontmatter(path: Path) -> RoundConfig:
 
     try:
         data = yaml.safe_load(parts[1]) or {}
-    except yaml.YAMLError:
+    except yaml.YAMLError as e:
+        C.warn(f"Failed to parse frontmatter in {path.name}: {e}")
         return RoundConfig()
 
     review = _parse_review_bool(data.get("review"))
@@ -155,7 +155,7 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
         test_command=str(data.get("test_command", "")),
         rounds=list(data.get("rounds", [])),
         branch_prefix=str(data.get("branch_prefix", "")),
-        max_budget_usd=data.get("max_budget_usd"),
+        max_budget_usd=float(data["max_budget_usd"]) if "max_budget_usd" in data else None,
         max_time_minutes=int(raw_time) if raw_time is not None else None,
         overrides=overrides,
     )
@@ -182,10 +182,12 @@ def _finalize_round_config(rc: RoundConfig) -> RoundConfig:
         changes["max_turns"] = _DEFAULT_MAX_TURNS
     if rc.max_time_minutes is None:
         changes["max_time_minutes"] = _DEFAULT_MAX_TIME_MINUTES
+    if rc.review is None:
+        changes["review"] = False
     if rc.gate not in VALID_GATES:
         C.warn(f"Unknown gate '{rc.gate}' for round '{rc.name}' — defaulting to 'hard'")
         changes["gate"] = "hard"
-    if rc.review_gate not in VALID_REVIEW_GATES:
+    if rc.review_gate not in VALID_GATES:
         C.warn(
             f"Unknown review_gate '{rc.review_gate}' for round '{rc.name}' "
             f"— defaulting to 'none'"

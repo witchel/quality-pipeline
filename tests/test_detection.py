@@ -109,32 +109,6 @@ class TestDetectTestCommand:
         assert qp.detect_test_command(tmp_path) == "bun test"
 
 
-class TestDetectGpu:
-    def test_no_gpu_tools(self, monkeypatch):
-        monkeypatch.setattr(shutil, "which", lambda name: None)
-        assert qp.detect_gpu() == "none"
-
-    def test_nvidia_smi_failure(self, monkeypatch):
-        monkeypatch.setattr(
-            shutil, "which",
-            lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None,
-        )
-        monkeypatch.setattr(
-            subprocess, "run",
-            lambda *a, **kw: (_ for _ in ()).throw(
-                subprocess.CalledProcessError(1, "nvidia-smi")
-            ),
-        )
-        assert qp.detect_gpu() == "none"
-
-    def test_rocm_smi_found(self, monkeypatch):
-        monkeypatch.setattr(
-            shutil, "which",
-            lambda name: "/usr/bin/rocm-smi" if name == "rocm-smi" else None,
-        )
-        assert qp.detect_gpu() == "rocm"
-
-
 class TestRunAnalyzer:
     def test_tool_not_found(self, monkeypatch):
         monkeypatch.setattr(shutil, "which", lambda name: None)

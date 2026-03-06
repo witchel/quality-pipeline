@@ -17,7 +17,7 @@ class TestResourceMonitor:
             qp.monitoring, "get_resource_snapshot", lambda gpu_type="none": "CPU: ok"
         )
         monitor = qp.ResourceMonitor(
-            interval=1, gpu_type="none", round_name="test", start_epoch=time.time()
+            interval=1, gpu_type="none", start_epoch=time.time(),
         )
         monitor.start()
         assert monitor._thread.is_alive()
@@ -83,3 +83,31 @@ class TestGetResourceSnapshot:
         monkeypatch.setattr(subprocess, "run", mock_run)
         result = qp.get_resource_snapshot("nvidia")
         assert "GPU" not in result
+
+
+class TestDetectGpuMoved:
+    """Tests for detect_gpu (moved from test_detection.py)."""
+
+    def test_no_gpu_tools(self, monkeypatch):
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        assert qp.detect_gpu() == "none"
+
+    def test_nvidia_smi_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            shutil, "which",
+            lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None,
+        )
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                subprocess.CalledProcessError(1, "nvidia-smi")
+            ),
+        )
+        assert qp.detect_gpu() == "none"
+
+    def test_rocm_smi_found(self, monkeypatch):
+        monkeypatch.setattr(
+            shutil, "which",
+            lambda name: "/usr/bin/rocm-smi" if name == "rocm-smi" else None,
+        )
+        assert qp.detect_gpu() == "rocm"

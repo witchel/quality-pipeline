@@ -147,6 +147,7 @@ def run_claude(
     if timeout_secs is not None:
         timer = threading.Timer(timeout_secs, _kill_on_timeout)
         timer.start()
+    stderr_thread: threading.Thread | None = None
     try:
         with log_file.open("w") as fout:
             # Tee stderr (progress) to terminal only; stdout (JSON) to log file.
@@ -157,14 +158,13 @@ def run_claude(
                     sys.stderr.write(line)
                     sys.stderr.flush()
 
-            t = threading.Thread(target=_tee_stderr, daemon=True)
-            t.start()
+            stderr_thread = threading.Thread(target=_tee_stderr, daemon=True)
+            stderr_thread.start()
 
             if proc.stdout is not None:
                 for line in proc.stdout:
                     fout.write(line)
 
-            t.join(timeout=5)
             proc.wait()
     except BaseException:
         _kill_process_group(proc)
@@ -173,6 +173,8 @@ def run_claude(
     finally:
         if timer is not None:
             timer.cancel()
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=5)
 
     if timed_out:
         C.err(
@@ -268,6 +270,7 @@ def run_reviewer(
         review_timeout_minutes * 60, _kill_reviewer_on_timeout,
     )
     rev_timer.start()
+    rev_stderr_thread: threading.Thread | None = None
     try:
         with review_output.open("w") as fout:
             def _tee_rev_stderr() -> None:
@@ -276,12 +279,11 @@ def run_reviewer(
                     sys.stderr.write(line)
                     sys.stderr.flush()
 
-            rt = threading.Thread(target=_tee_rev_stderr, daemon=True)
-            rt.start()
+            rev_stderr_thread = threading.Thread(target=_tee_rev_stderr, daemon=True)
+            rev_stderr_thread.start()
             if rev_proc.stdout is not None:
                 for line in rev_proc.stdout:
                     fout.write(line)
-            rt.join(timeout=5)
             rev_proc.wait()
     except BaseException:
         _kill_process_group(rev_proc)
@@ -289,6 +291,8 @@ def run_reviewer(
         raise
     finally:
         rev_timer.cancel()
+        if rev_stderr_thread is not None:
+            rev_stderr_thread.join(timeout=5)
 
     if review_timed_out:
         C.warn(f"Reviewer timed out after {review_timeout_minutes}m — skipping review")

@@ -158,7 +158,7 @@ def _execute_round(
 
     # Log initial resource state and start monitor
     C.log(f"Resources: {get_resource_snapshot(gpu_type)}")
-    monitor = ResourceMonitor(60, gpu_type, rc.name, round_start)
+    monitor = ResourceMonitor(60, gpu_type, round_start)
     monitor.start()
     _cleanup.monitor = monitor
 

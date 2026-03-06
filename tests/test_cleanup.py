@@ -54,6 +54,18 @@ class TestPipelineCleanup:
         captured = capsys.readouterr()
         assert "audit-tests" in captured.err or "audit-tests" in captured.out
 
+    def test_cleanup_idempotent(self, capsys):
+        """Double cleanup should only print the interrupt message once."""
+        cleanup = qp.PipelineCleanup()
+        cleanup.current_round = "audit-tests"
+        cleanup.worktree_mode = False
+        cleanup.cleanup()
+        first = capsys.readouterr()
+        cleanup.cleanup()
+        second = capsys.readouterr()
+        assert "audit-tests" in first.err or "audit-tests" in first.out
+        assert "audit-tests" not in second.err and "audit-tests" not in second.out
+
     def test_cleanup_worktree_mode_message(self, capsys):
         cleanup = qp.PipelineCleanup()
         cleanup.current_round = "audit-tests"
@@ -113,6 +125,23 @@ class TestCleanupWorktree:
         )
         cleanup._cleanup_worktree()
         assert Path.cwd() == orig
+        assert cleanup.worktree_dir is None
+
+    def test_chdir_failure_continues_cleanup(self, tmp_path, monkeypatch):
+        """If original_dir is gone, cleanup should still remove worktree."""
+        cleanup = qp.PipelineCleanup()
+        gone = tmp_path / "gone"
+        wt = tmp_path / "worktree"
+        wt.mkdir()
+        cleanup.worktree_dir = wt
+        cleanup.original_dir = gone  # does not exist
+        cleanup.symlink_dirs = []
+
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: MagicMock(returncode=0),
+        )
+        cleanup._cleanup_worktree()  # should not raise
         assert cleanup.worktree_dir is None
 
     def test_removes_symlinks(self, tmp_path, monkeypatch):

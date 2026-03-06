@@ -65,6 +65,14 @@ class TestParseFrontmatter:
         rc = qp.parse_frontmatter(f)
         assert rc.name == ""
 
+    def test_invalid_yaml_warns(self, tmp_path, capsys):
+        """Invalid YAML frontmatter should emit a warning."""
+        f = tmp_path / "round.md"
+        f.write_text("---\n: [invalid yaml\n---\nPrompt.\n")
+        qp.parse_frontmatter(f)
+        captured = capsys.readouterr()
+        assert "Failed to parse frontmatter" in captured.out
+
     def test_review_string_true(self, tmp_path):
         f = tmp_path / "round.md"
         f.write_text("---\nname: r\nreview: 'true'\n---\n")
@@ -250,6 +258,17 @@ class TestFinalizeRoundConfig:
             result = qp._finalize_round_config(rc)
             assert result.gate == gate
 
+    def test_review_none_resolved_to_false(self):
+        """review=None should be finalized to False."""
+        rc = qp.RoundConfig(name="test", review=None)
+        result = qp._finalize_round_config(rc)
+        assert result.review is False
+
+    def test_review_true_preserved(self):
+        rc = qp.RoundConfig(name="test", review=True)
+        result = qp._finalize_round_config(rc)
+        assert result.review is True
+
 
 class TestApplyConfigPromptAppend:
     def test_no_override(self):
@@ -319,6 +338,14 @@ class TestLoadPipelineConfig:
         cfg = qp.load_pipeline_config(f)
         assert "valid" in cfg.overrides
         assert "invalid" not in cfg.overrides
+
+    def test_max_budget_coerced_to_float(self, tmp_path):
+        """YAML integer max_budget_usd should be coerced to float."""
+        f = tmp_path / "pipeline.yaml"
+        f.write_text(yaml.dump({"max_budget_usd": 5}))
+        cfg = qp.load_pipeline_config(f)
+        assert isinstance(cfg.max_budget_usd, float)
+        assert cfg.max_budget_usd == 5.0
 
 
 class TestParseReviewBool:

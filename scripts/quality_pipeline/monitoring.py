@@ -45,17 +45,17 @@ def get_resource_snapshot(gpu_type: str = "none") -> str:
             mem_total = int(
                 subprocess.run(
                     ["sysctl", "-n", "hw.memsize"],
-                    capture_output=True, text=True, check=True,
+                    capture_output=True, text=True, check=True, timeout=5,
                 ).stdout.strip()
             ) // (1024 * 1024)
             page_size = int(
                 subprocess.run(
                     ["sysctl", "-n", "hw.pagesize"],
-                    capture_output=True, text=True, check=True,
+                    capture_output=True, text=True, check=True, timeout=5,
                 ).stdout.strip()
             )
             vm_out = subprocess.run(
-                ["vm_stat"], capture_output=True, text=True, check=True
+                ["vm_stat"], capture_output=True, text=True, check=True, timeout=5,
             ).stdout
             pages = {"active": 0, "wired": 0, "compressed": 0}
             for line in vm_out.splitlines():
@@ -138,7 +138,7 @@ class ResourceMonitor:
     """Daemon thread that logs resource usage periodically."""
 
     def __init__(
-        self, interval: int, gpu_type: str, round_name: str, start_epoch: float
+        self, interval: int, gpu_type: str, start_epoch: float,
     ) -> None:
         self._stop = threading.Event()
         self._interval = interval

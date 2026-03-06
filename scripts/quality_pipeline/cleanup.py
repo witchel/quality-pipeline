@@ -72,9 +72,13 @@ class PipelineCleanup:
                 self.lock_dir.rmdir()
             except OSError:
                 pass
-        if self.current_round:
+        # Save and clear current_round so repeated calls (signal + atexit)
+        # don't print the interruption message twice.
+        interrupted_round = self.current_round
+        self.current_round = ""
+        if interrupted_round:
             print()
-            C.err(f"Interrupted during round: {self.current_round}")
+            C.err(f"Interrupted during round: {interrupted_round}")
             if self.worktree_mode:
                 C.warn("Worktree removed. Original repo is unchanged.")
             else:
@@ -88,7 +92,10 @@ class PipelineCleanup:
         self.worktree_dir = None
 
         if self.original_dir:
-            os.chdir(self.original_dir)
+            try:
+                os.chdir(self.original_dir)
+            except OSError:
+                pass  # dir may be gone; continue cleanup to remove worktree+lock
 
         # Remove symlinks first
         for d in self.symlink_dirs:
