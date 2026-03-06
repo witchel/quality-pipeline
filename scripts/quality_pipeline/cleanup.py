@@ -27,7 +27,21 @@ class PipelineCleanup:
         self.monitor: object | None = None  # ResourceMonitor, but avoid circular import
         self.current_round: str = ""
         self.worktree_mode: bool = False
+        self._activated: bool = False
+
+    def activate(self) -> None:
+        """Register atexit and signal handlers. Call once from the CLI entry point."""
+        if self._activated:
+            return
+        self._activated = True
         atexit.register(self.cleanup)
+        try:
+            signal.signal(signal.SIGINT, _handle_signal)
+            signal.signal(signal.SIGTERM, _handle_signal)
+            if hasattr(signal, "SIGHUP"):
+                signal.signal(signal.SIGHUP, _handle_signal)
+        except ValueError:
+            pass  # not main thread
 
     def make_temp(self) -> Path:
         fd, path = tempfile.mkstemp()
@@ -106,9 +120,3 @@ _cleanup = PipelineCleanup()
 
 def _handle_signal(signum: int, _frame: object) -> None:  # noqa: ARG001
     sys.exit(128 + signum)
-
-
-signal.signal(signal.SIGINT, _handle_signal)
-signal.signal(signal.SIGTERM, _handle_signal)
-if hasattr(signal, "SIGHUP"):
-    signal.signal(signal.SIGHUP, _handle_signal)

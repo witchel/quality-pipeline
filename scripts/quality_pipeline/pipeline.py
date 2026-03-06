@@ -44,6 +44,11 @@ from .process import run_claude, run_reviewer, run_tests_with_tee
 from .cleanup import _cleanup
 
 
+def _remaining_seconds(round_start: float, max_minutes: int) -> int:
+    """Seconds remaining in the round's time budget."""
+    return int(max_minutes * 60 - (time.time() - round_start))
+
+
 def _print_round_header(round_num: int, total: int, rc: RoundConfig) -> None:
     """Print the standard round header banner."""
     print()
@@ -210,14 +215,14 @@ def _execute_round(
 
     # --- Test + retry loop ---
     test_output_file = _cleanup.make_temp()
-    test_timeout = rc.max_time_minutes * 60
     attempt = 0
     tests_passed = False
 
     while True:
+        test_remaining = max(60, _remaining_seconds(round_start, rc.max_time_minutes))
         C.log(f"Running tests: {test_cmd}")
         test_exit = run_tests_with_tee(
-            test_cmd, test_output_file, timeout_seconds=test_timeout,
+            test_cmd, test_output_file, timeout_seconds=test_remaining,
         )
 
         if test_exit == 0:
@@ -229,6 +234,11 @@ def _execute_round(
         attempt += 1
 
         if attempt > rc.max_retries:
+            break
+
+        remaining = _remaining_seconds(round_start, rc.max_time_minutes)
+        if remaining <= 60:
+            C.warn("Round time budget exhausted — stopping retries")
             break
 
         C.warn(f"Retry {attempt}/{rc.max_retries}: re-invoking Claude to fix test failures...")
@@ -247,7 +257,7 @@ def _execute_round(
         retry_log = log_dir / f"round-{round_num}-retry-{attempt}.log"
         retry_exit = run_claude(
             retry_prompt, system_context, retry_budget, rc.max_turns, retry_log,
-            timeout_minutes=max(5, rc.max_time_minutes // 2),
+            timeout_minutes=max(1, remaining // 60),
         )
         C.log(f"Retry claude finished (exit {retry_exit})")
 
@@ -291,6 +301,8 @@ def pipeline(
     log_dir_arg: str | None,
 ) -> None:
     """Main pipeline orchestrator."""
+    _cleanup.activate()
+
     # Change to project directory
     if project_dir:
         pdir = Path(project_dir)

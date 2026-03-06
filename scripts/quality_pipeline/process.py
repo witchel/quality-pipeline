@@ -301,7 +301,7 @@ def run_reviewer(
     elif verdict == "warn":
         C.warn(f"Reviewer: {C.YELLOW}WARN{C.NC} — see {review_output}")
     elif verdict == "critical":
-        C.err(f"Reviewer: {C.RED}CRITICAL{C.NC} — see {review_output}")
+        C.err(f"Reviewer: CRITICAL — see {review_output}")
     else:
         C.warn(f"Reviewer: could not parse verdict — see {review_output}")
     return verdict
