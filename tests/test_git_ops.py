@@ -101,6 +101,31 @@ class TestGitRollbackRound:
         assert any("checkout" in c for c in calls)
 
 
+class TestGitRollbackPreservesPreExisting:
+    def test_does_not_remove_pre_existing_untracked(self, tmp_path, monkeypatch):
+        """Pre-existing untracked files should NOT be removed during rollback."""
+        pre_existing = tmp_path / "pre_existing.py"
+        pre_existing.write_text("keep me")
+        new_file = tmp_path / "new.py"
+        new_file.write_text("delete me")
+
+        def mock_git(*args, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            # ls-files returns both files as untracked
+            if "ls-files" in args:
+                r.stdout = f"{pre_existing}\n{new_file}\n"
+            else:
+                r.stdout = ""
+            return r
+
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+        qp.git_rollback_round({str(pre_existing)})
+        # pre-existing should still exist; new file should be removed
+        assert pre_existing.exists()
+        assert not new_file.exists()
+
+
 class TestGitCreateBranch:
     def test_creates_new_branch(self, monkeypatch):
         calls = []

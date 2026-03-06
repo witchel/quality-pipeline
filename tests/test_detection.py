@@ -108,6 +108,31 @@ class TestDetectTestCommand:
         (tmp_path / "bun.lock").write_text("{}")
         assert qp.detect_test_command(tmp_path) == "bun test"
 
+    def test_setup_cfg_with_uv_lock(self, tmp_path):
+        """setup.cfg with [tool:pytest] + uv.lock should use 'uv run pytest'."""
+        (tmp_path / "setup.cfg").write_text("[tool:pytest]\n")
+        (tmp_path / "uv.lock").write_text("")
+        assert qp.detect_test_command(tmp_path) == "uv run pytest"
+
+    def test_test_dir_singular(self, tmp_path):
+        """'test/' dir (not just 'tests/') with python markers should detect pytest."""
+        (tmp_path / "test").mkdir()
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'foo'\n")
+        (tmp_path / "uv.lock").write_text("")
+        assert qp.detect_test_command(tmp_path) == "uv run pytest"
+
+    def test_claude_md_run_tests_line(self, tmp_path):
+        """'run tests:' variant should also be detected."""
+        (tmp_path / "CLAUDE.md").write_text("run tests: make check\n")
+        assert qp.detect_test_command(tmp_path) == "make check"
+
+    def test_pyproject_with_pytest_mention(self, tmp_path):
+        """A pyproject.toml mentioning 'pytest' in dependencies should detect it."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\ndependencies = ["pytest"]\n'
+        )
+        assert qp.detect_test_command(tmp_path) == "pytest"
+
 
 class TestRunAnalyzer:
     def test_tool_not_found(self, monkeypatch):

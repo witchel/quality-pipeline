@@ -227,6 +227,13 @@ class TestApplyConfigOverrides:
         result = qp.apply_config_overrides(rc, cfg)
         assert result.max_budget_usd == 3.0
 
+    def test_review_gate_override(self):
+        """Per-round override should set review_gate."""
+        rc = qp.RoundConfig(name="test")
+        cfg = qp.PipelineConfig(overrides={"test": {"review_gate": "hard"}})
+        result = qp.apply_config_overrides(rc, cfg)
+        assert result.review_gate == "hard"
+
 
 class TestFinalizeRoundConfig:
     def test_fills_defaults(self):
@@ -268,6 +275,13 @@ class TestFinalizeRoundConfig:
         rc = qp.RoundConfig(name="test", review=True)
         result = qp._finalize_round_config(rc)
         assert result.review is True
+
+    def test_invalid_review_gate_warns_and_defaults(self, capsys):
+        rc = qp.RoundConfig(name="test", review_gate="bogus")
+        result = qp._finalize_round_config(rc)
+        assert result.review_gate == "none"
+        captured = capsys.readouterr()
+        assert "Unknown review_gate" in captured.out
 
 
 class TestApplyConfigPromptAppend:
@@ -346,6 +360,20 @@ class TestLoadPipelineConfig:
         cfg = qp.load_pipeline_config(f)
         assert isinstance(cfg.max_budget_usd, float)
         assert cfg.max_budget_usd == 5.0
+
+    def test_max_time_minutes_coerced_to_int(self, tmp_path):
+        """YAML float max_time_minutes should be coerced to int."""
+        f = tmp_path / "pipeline.yaml"
+        f.write_text(yaml.dump({"max_time_minutes": 20}))
+        cfg = qp.load_pipeline_config(f)
+        assert isinstance(cfg.max_time_minutes, int)
+        assert cfg.max_time_minutes == 20
+
+    def test_max_time_minutes_absent_is_none(self, tmp_path):
+        f = tmp_path / "pipeline.yaml"
+        f.write_text(yaml.dump({"test_command": "pytest"}))
+        cfg = qp.load_pipeline_config(f)
+        assert cfg.max_time_minutes is None
 
 
 class TestParseReviewBool:

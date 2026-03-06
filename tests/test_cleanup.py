@@ -168,6 +168,31 @@ class TestCleanupWorktree:
         cleanup._cleanup_worktree()
         assert not link.exists()
 
+    def test_removes_env_symlinks(self, tmp_path, monkeypatch):
+        """cleanup_worktree should also remove .env file symlinks."""
+        cleanup = qp.PipelineCleanup()
+        orig = tmp_path / "orig"
+        orig.mkdir()
+        wt = tmp_path / "worktree"
+        wt.mkdir()
+
+        # Create .env symlink in worktree
+        env_target = orig / ".env"
+        env_target.write_text("SECRET=val")
+        env_link = wt / ".env"
+        env_link.symlink_to(env_target)
+
+        cleanup.worktree_dir = wt
+        cleanup.original_dir = orig
+        cleanup.symlink_dirs = []
+
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: MagicMock(returncode=0),
+        )
+        cleanup._cleanup_worktree()
+        assert not env_link.exists()
+
     def test_fallback_on_git_worktree_remove_failure(self, tmp_path, monkeypatch):
         cleanup = qp.PipelineCleanup()
         orig = tmp_path / "orig"

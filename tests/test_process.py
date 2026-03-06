@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -106,6 +107,39 @@ class TestRunTestsWithTee:
         assert "err" in output_file.read_text()
 
 
+class TestRunTestsStdbuf:
+    def test_stdbuf_prepended_when_available(self, tmp_path, monkeypatch):
+        """When stdbuf is available, it should be prepended to the command."""
+        output_file = tmp_path / "output.txt"
+        captured_cmds = []
+        original_popen = subprocess.Popen
+
+        def capture_popen(cmd, **kwargs):
+            captured_cmds.append(cmd)
+            # Replace the stdbuf-prefixed cmd with just the original command
+            # so the test can actually run
+            clean_cmd = cmd
+            for prefix in ("stdbuf -oL ", "gstdbuf -oL "):
+                if cmd.startswith(prefix):
+                    clean_cmd = cmd[len(prefix):]
+                    break
+            return original_popen(clean_cmd, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", capture_popen)
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/stdbuf" if name == "stdbuf" else None)
+        exit_code = qp.run_tests_with_tee("echo stdbuf_test", output_file)
+        assert exit_code == 0
+        assert captured_cmds[0].startswith("stdbuf -oL ")
+
+    def test_no_stdbuf_still_works(self, tmp_path, monkeypatch):
+        """When neither stdbuf nor gstdbuf is available, command runs normally."""
+        output_file = tmp_path / "output.txt"
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        exit_code = qp.run_tests_with_tee("echo no_stdbuf", output_file)
+        assert exit_code == 0
+        assert "no_stdbuf" in output_file.read_text()
+
+
 class TestRunTestsTimeout:
     def test_timeout_returns_negative_one(self, tmp_path):
         output_file = tmp_path / "test.out"
@@ -174,6 +208,49 @@ class TestRunClaude:
             "prompt", "ctx", 5.0, 20, log_file, timeout_minutes=1,
         )
         assert code == -1
+
+
+class TestParseVerdict:
+    """Direct unit tests for _parse_verdict — exercises JSON unwrapping,
+    code fence removal, and nested result extraction."""
+
+    def test_plain_json(self):
+        assert qp._parse_verdict('{"verdict": "pass"}') == "pass"
+
+    def test_plain_json_critical(self):
+        assert qp._parse_verdict('{"verdict": "critical"}') == "critical"
+
+    def test_wrapped_in_result_key(self):
+        """claude JSON output wraps the answer in {"result": "..."}."""
+        inner = json.dumps({"verdict": "warn"})
+        outer = json.dumps({"result": inner})
+        assert qp._parse_verdict(outer) == "warn"
+
+    def test_code_fence_json(self):
+        raw = '```json\n{"verdict": "pass"}\n```'
+        assert qp._parse_verdict(raw) == "pass"
+
+    def test_code_fence_no_lang(self):
+        raw = '```\n{"verdict": "critical"}\n```'
+        assert qp._parse_verdict(raw) == "critical"
+
+    def test_result_wrapped_code_fence(self):
+        """Result key wrapping a code-fenced verdict."""
+        inner = '```json\n{"verdict": "warn"}\n```'
+        outer = json.dumps({"result": inner})
+        assert qp._parse_verdict(outer) == "warn"
+
+    def test_not_json(self):
+        assert qp._parse_verdict("this is not json") == "unknown"
+
+    def test_empty_string(self):
+        assert qp._parse_verdict("") == "unknown"
+
+    def test_json_no_verdict_key(self):
+        assert qp._parse_verdict('{"foo": "bar"}') == "unknown"
+
+    def test_whitespace_padding(self):
+        assert qp._parse_verdict('  {"verdict": "pass"}  ') == "pass"
 
 
 class TestRunReviewer:

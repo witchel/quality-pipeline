@@ -160,6 +160,56 @@ class TestRunRound:
         assert len(rolled_back) == 1
 
 
+class TestRunRoundWithPreparsedConfig:
+    """Test that passing rc= to run_round uses it instead of re-parsing."""
+
+    @pytest.fixture
+    def log_dir(self, tmp_path):
+        d = tmp_path / "logs"
+        d.mkdir()
+        return d
+
+    @pytest.fixture
+    def mock_env(self, monkeypatch):
+        monkeypatch.setattr(qp.pipeline_mod, "git_rev_parse_head", lambda: "abc123")
+        monkeypatch.setattr(qp.pipeline_mod, "git_untracked_files", lambda: set())
+        monkeypatch.setattr(
+            qp.pipeline_mod, "get_resource_snapshot", lambda gpu_type="none": "CPU: ok"
+        )
+        monkeypatch.setattr(
+            qp.pipeline_mod, "run_static_analysis", lambda *a, **kw: ""
+        )
+        monkeypatch.setattr(qp.pipeline_mod, "git_stage_round_changes", lambda pre: None)
+        monkeypatch.setattr(qp.pipeline_mod, "git_commit", lambda msg: None)
+        monkeypatch.setattr(qp.pipeline_mod, "run_reviewer", lambda *a, **kw: None)
+        monkeypatch.setattr(qp.ResourceMonitor, "start", lambda self: None)
+        monkeypatch.setattr(qp.ResourceMonitor, "stop", lambda self: None)
+
+    def test_rc_parameter_used_directly(
+        self, tmp_path, log_dir, mock_env, monkeypatch
+    ):
+        """When rc is passed, run_round should use it without calling parse_frontmatter."""
+        f = tmp_path / "01-test.md"
+        f.write_text("---\nname: file-name\ngate: hard\n---\nDo stuff.\n")
+
+        # Provide a different rc to prove it's used instead of the file's frontmatter
+        custom_rc = qp.RoundConfig(
+            name="custom-name", gate="none",
+            max_budget_usd=1.0, max_turns=5, max_time_minutes=1,
+            review=False,
+        )
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **kw: 0)
+        # gate=none means tests are skipped, so we just need changes to exist
+        monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
+
+        result = qp.run_round(
+            f, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none",
+            rc=custom_rc,
+        )
+        # gate=none with changes -> PASSED (tests skipped)
+        assert result == qp.RoundOutcome.PASSED
+
+
 class TestRemainingSeconds:
     def test_time_remaining(self):
         start = time.time() - 120  # 2 minutes ago
@@ -509,6 +559,21 @@ class TestPipeline:
         # Round 3 (concurrency) should never have been executed
         assert "concurrency" not in executed
         assert "refactor" in executed
+
+    def test_nonexistent_project_dir_exits(self, pipeline_env, monkeypatch):
+        with pytest.raises(SystemExit):
+            qp.pipeline(
+                project_dir="/nonexistent/path/that/does/not/exist",
+                rounds_arg=None,
+                config_file=None,
+                start_from=1,
+                dry_run=False,
+                worktree=False,
+                worktree_symlinks=None,
+                test_command="true",
+                review_flag=None,
+                log_dir_arg=str(pipeline_env / "logs"),
+            )
 
     def test_config_file_loaded(self, tmp_path, pipeline_env, monkeypatch):
         cfg_file = tmp_path / "custom.yaml"
