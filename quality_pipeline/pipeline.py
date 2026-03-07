@@ -579,7 +579,7 @@ def pipeline(
             C.log(f"  {lf}")
     C.log("\u2501" * 60)
 
-    if hard_failed > 0:
+    if any(r.outcome == RoundOutcome.HARD_FAILED for r in results):
         sys.exit(1)
 
     C.ok(f"Pipeline complete. Review commits with: git log --oneline {branch_name}")
