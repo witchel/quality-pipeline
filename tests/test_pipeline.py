@@ -159,6 +159,42 @@ class TestRunRound:
         assert result == qp.RoundOutcome.SOFT_FAILED
         assert len(rolled_back) == 1
 
+    def test_retry_stops_when_time_exhausted(
+        self, tmp_path, log_dir, mock_env, monkeypatch
+    ):
+        """Retries should stop when time budget is exhausted."""
+        f = tmp_path / "01-retry.md"
+        f.write_text(
+            "---\nname: time-exhaust\ngate: hard\nmax_retries: 2\n---\nDo stuff.\n"
+        )
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
+
+        def mock_tests(cmd, output_file, **_kw):
+            output_file.write_text("FAIL: test_foo")
+            return 1
+        monkeypatch.setattr(qp.pipeline_mod, "run_tests_with_tee", mock_tests)
+        rolled_back = []
+        monkeypatch.setattr(
+            qp.pipeline_mod, "git_rollback_round", lambda _pre: rolled_back.append(1)
+        )
+
+        # First _remaining_seconds call is for test timeout (return plenty of time),
+        # second call checks whether to retry (return exhausted).
+        call_count = [0]
+        def mock_remaining(start, max_min):
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                return 30  # Under _MIN_TEST_TIMEOUT_SECS (60)
+            return 300
+        monkeypatch.setattr(qp.pipeline_mod, "_remaining_seconds", mock_remaining)
+
+        result = qp.run_round(
+            f, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
+        )
+        assert result == qp.RoundOutcome.HARD_FAILED
+        assert len(rolled_back) == 1
+
 
 class TestRunRoundWithPreparsedConfig:
     """Test that passing rc= to run_round uses it instead of re-parsing."""
@@ -600,3 +636,29 @@ class TestPipeline:
         )
         assert configs_seen[0][0] == "make test"
         assert "audit" in configs_seen[0][1].overrides
+
+    def test_auto_loads_pipeline_yaml(self, tmp_path, pipeline_env, monkeypatch):
+        """Should auto-load .claude/pipeline.yaml when no config_file is given."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "pipeline.yaml").write_text(yaml.dump({
+            "test_command": "make check",
+        }))
+        test_cmds = []
+        def mock_run_round(rf, _n, _total, test_cmd, config, *args, **_kwargs):
+            test_cmds.append(test_cmd)
+            return qp.RoundOutcome.PASSED
+        monkeypatch.setattr(qp.pipeline_mod, "run_round", mock_run_round)
+        qp.pipeline(
+            project_dir=None,
+            rounds_arg=None,
+            config_file=None,
+            start_from=1,
+            dry_run=False,
+            worktree=False,
+            worktree_symlinks=None,
+            test_command=None,
+            review_flag=None,
+            log_dir_arg=str(pipeline_env / "logs"),
+        )
+        assert test_cmds[0] == "make check"

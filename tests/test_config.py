@@ -91,6 +91,15 @@ class TestParseFrontmatter:
         rc = qp.parse_frontmatter(f)
         assert rc.review is True
 
+    def test_invalid_value_type_warns(self, tmp_path, capsys):
+        """Non-numeric max_budget_usd triggers ValueError catch and returns defaults."""
+        f = tmp_path / "round.md"
+        f.write_text("---\nname: test\nmax_budget_usd: not-a-number\n---\nPrompt.\n")
+        rc = qp.parse_frontmatter(f)
+        assert rc.name == ""  # Returns default RoundConfig on error
+        captured = capsys.readouterr()
+        assert "Invalid value" in captured.out
+
 
 class TestGetRoundPrompt:
     def test_with_frontmatter(self, tmp_path):
@@ -459,3 +468,11 @@ class TestResolveRoundFile:
         monkeypatch.setattr(qp.config, "ROUNDS_DIR", tmp_path)
         (tmp_path / "01-audit.md").write_text("---\nname: audit\n---\n")
         assert qp.resolve_round_file("nonexistent") is None
+
+    def test_glob_special_chars_escaped(self, tmp_path, monkeypatch):
+        """Round names with glob special chars should be properly escaped."""
+        monkeypatch.setattr(qp.config, "ROUNDS_DIR", tmp_path)
+        f = tmp_path / "01-test[1].md"
+        f.write_text("---\nname: other\n---\n")
+        result = qp.resolve_round_file("test[1]")
+        assert result == f

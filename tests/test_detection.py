@@ -186,6 +186,21 @@ class TestRunAnalyzer:
         qp._run_analyzer("mypy", ["mypy", "."], tmp_path)
         assert run_calls[0][0] == "gtimeout"
 
+    def test_timeout_prefix_timeout_fallback(self, tmp_path, monkeypatch):
+        """When gtimeout is unavailable, should fall back to timeout."""
+        run_calls = []
+        def mock_which(name):
+            if name == "gtimeout":
+                return None
+            return f"/usr/bin/{name}"
+        def mock_run(*args, **_kwargs):
+            run_calls.append(args[0])
+            return MagicMock(stdout="ok", returncode=0)
+        monkeypatch.setattr(shutil, "which", mock_which)
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        qp._run_analyzer("mypy", ["mypy", "."], tmp_path)
+        assert run_calls[0][0] == "timeout"
+
 
 class TestRunStaticAnalysis:
     def test_unknown_round_no_analyzers(self):
@@ -216,4 +231,25 @@ class TestRunStaticAnalysis:
             lambda _name, _args, _proj, _prereqs=None: "found",
         )
         result = qp.run_static_analysis("any", Path("."), "nonexistent_tool")
+        assert result == ""
+
+    def test_default_round_analyzers(self, monkeypatch):
+        """Known round name should use DEFAULT_ANALYZERS mapping."""
+        called = []
+        def mock_analyzer(name, _args, _proj, _prereqs=None):
+            called.append(name)
+            return f"output-{name}"
+        monkeypatch.setattr(qp.detection, "_run_analyzer", mock_analyzer)
+        result = qp.run_static_analysis("security", Path("."))
+        assert "### bandit" in result
+        assert "### semgrep" in result
+        assert set(called) == {"bandit", "semgrep"}
+
+    def test_all_analyzers_empty_output(self, monkeypatch):
+        """When all analyzers produce no output, result should be empty."""
+        monkeypatch.setattr(
+            qp.detection, "_run_analyzer",
+            lambda _name, _args, _proj, _prereqs=None: "",
+        )
+        result = qp.run_static_analysis("security", Path("."))
         assert result == ""

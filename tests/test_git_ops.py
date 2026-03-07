@@ -217,6 +217,26 @@ class TestGitAcquireLock:
         with pytest.raises(SystemExit):
             qp.git_acquire_lock(False)
 
+    def test_stale_reclaim_failure_exits(self, tmp_path, monkeypatch):
+        """When stale lock reclaim fails (e.g., non-empty dir), should exit."""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        lock_path = git_dir / "quality-pipeline.lock"
+        lock_path.mkdir()
+        # Put a file inside lock dir so rmdir() fails with OSError
+        (lock_path / "leftover").write_text("x")
+        pid_file = git_dir / "quality-pipeline.lock.pid"
+        pid_file.write_text("99999999")
+
+        monkeypatch.setattr(qp.git_ops, "git", _mock_git_fn(stdout=str(git_dir) + "\n"))
+
+        def _kill_raises(_pid, _sig):
+            raise ProcessLookupError
+        monkeypatch.setattr(qp.git_ops.os, "kill", _kill_raises)
+
+        with pytest.raises(SystemExit):
+            qp.git_acquire_lock(False)
+
 
 class TestGitRevParseHead:
     def test_returns_sha(self, monkeypatch):
