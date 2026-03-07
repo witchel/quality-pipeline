@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import subprocess
 import sys
@@ -120,31 +121,48 @@ def git_acquire_lock(dry_run: bool) -> Path | None:
 
     Writes a sibling PID file so future runs can detect and reclaim
     stale locks left by crashed processes (e.g. SIGKILL).
+
+    All lock operations (create, stale-check, reclaim) are serialized
+    via ``fcntl.flock`` on a helper file to prevent a TOCTOU race where
+    two processes both see a stale lock and both try to reclaim it.
     """
     if dry_run:
         return None
     git_dir = git("rev-parse", "--git-dir").stdout.strip()
     lock_path = Path(git_dir) / "quality-pipeline.lock"
     pid_file = _lock_pid_path(lock_path)
+
+    # Serialize all lock acquisition attempts via flock.  This prevents
+    # the TOCTOU race in stale-lock reclaim: without serialization, two
+    # processes can both see a stale lock and both execute rmdir→mkdir,
+    # where the second reclaimer destroys the first's freshly-created
+    # lock directory.
+    acquire_path = Path(git_dir) / "quality-pipeline.acquire"
+    acquire_fd = os.open(str(acquire_path), os.O_CREAT | os.O_RDWR)
     try:
-        lock_path.mkdir()
-    except FileExistsError:
-        if _is_lock_stale(lock_path):
-            C.warn("Stale pipeline lock detected — reclaiming")
-            try:
-                pid_file.unlink(missing_ok=True)
-                lock_path.rmdir()
-                lock_path.mkdir()
-            except OSError as e:
-                C.err(f"Failed to reclaim stale lock: {e}")
-                C.err(f"Manual cleanup: rm -rf '{lock_path}' '{pid_file}'")
+        fcntl.flock(acquire_fd, fcntl.LOCK_EX)
+        try:
+            lock_path.mkdir()
+        except FileExistsError:
+            if _is_lock_stale(lock_path):
+                C.warn("Stale pipeline lock detected — reclaiming")
+                try:
+                    pid_file.unlink(missing_ok=True)
+                    lock_path.rmdir()
+                    lock_path.mkdir()
+                except OSError as e:
+                    C.err(f"Failed to reclaim stale lock: {e}")
+                    C.err(f"Manual cleanup: rm -rf '{lock_path}' '{pid_file}'")
+                    sys.exit(1)
+            else:
+                C.err("Another pipeline is running in this repository.")
+                C.err(f"If stale, remove: rmdir '{lock_path}'")
                 sys.exit(1)
-        else:
-            C.err("Another pipeline is running in this repository.")
-            C.err(f"If stale, remove: rmdir '{lock_path}'")
-            sys.exit(1)
-    # Record PID for stale lock detection
-    pid_file.write_text(str(os.getpid()))
+        # Record PID while still holding the flock, so the next acquirer
+        # always sees a valid PID file when it checks _is_lock_stale.
+        pid_file.write_text(str(os.getpid()))
+    finally:
+        os.close(acquire_fd)
     return lock_path
 
 
