@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -372,3 +372,149 @@ class TestIdempotency:
         cleanup2 = qp.PipelineCleanup()
         cleanup2.lock_dir = result2
         cleanup2.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# F. Atomic PID file write
+# ---------------------------------------------------------------------------
+
+
+class TestPidFileAtomicWrite:
+    """Verify that git_acquire_lock writes the PID file atomically."""
+
+    def test_pid_file_uses_atomic_write(self, tmp_path, monkeypatch):
+        """PID file must be written via atomic_write_text, not plain write_text."""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        monkeypatch.setattr(qp.git_ops, "git", _mock_git_fn(stdout=str(git_dir) + "\n"))
+
+        atomic_calls = []
+        orig_atomic = qp.output.atomic_write_text
+
+        def tracking_atomic(path, content):
+            atomic_calls.append((path, content))
+            return orig_atomic(path, content)
+
+        monkeypatch.setattr(qp.git_ops, "atomic_write_text", tracking_atomic)
+
+        result = qp.git_acquire_lock(False)
+        assert result is not None
+
+        # Verify atomic_write_text was called for the PID file
+        pid_file = git_dir / "quality-pipeline.lock.pid"
+        pid_calls = [(p, c) for p, c in atomic_calls if p == pid_file]
+        assert len(pid_calls) == 1, "PID file should be written atomically exactly once"
+        assert pid_calls[0][1] == str(os.getpid())
+
+        # Cleanup
+        pid_file.unlink()
+        result.rmdir()
+
+    def test_pid_file_survives_simulated_crash(self, tmp_path, monkeypatch):
+        """If atomic write fails, no corrupt PID file should exist."""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        monkeypatch.setattr(qp.git_ops, "git", _mock_git_fn(stdout=str(git_dir) + "\n"))
+
+        # Pre-populate a valid PID file from a "previous run"
+        pid_file = git_dir / "quality-pipeline.lock.pid"
+        pid_file.write_text("12345")
+
+        def failing_atomic(path, content):
+            if path == pid_file:
+                raise OSError("simulated disk failure")
+            return qp.output.atomic_write_text(path, content)
+
+        monkeypatch.setattr(qp.git_ops, "atomic_write_text", failing_atomic)
+
+        # The lock mkdir succeeds, but PID write fails — should propagate
+        with pytest.raises(OSError, match="simulated disk failure"):
+            qp.git_acquire_lock(False)
+
+        # The old PID file content should be intact (atomic_write_text
+        # guarantees no partial writes)
+        assert pid_file.read_text() == "12345"
+
+        # Cleanup the lock dir that was created before the failure
+        lock_path = git_dir / "quality-pipeline.lock"
+        if lock_path.exists():
+            lock_path.rmdir()
+
+
+# ---------------------------------------------------------------------------
+# G. Cleanup double-call idempotency
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupDoubleCallIdempotency:
+    """Verify that cleanup() can be called twice safely (signal + atexit)."""
+
+    def test_monitor_stopped_only_once(self):
+        """Monitor.stop() should only be called once across two cleanup() calls."""
+        cleanup = qp.PipelineCleanup()
+        monitor = MagicMock()
+        cleanup.monitor = monitor
+
+        cleanup.cleanup()
+        assert monitor.stop.call_count == 1
+        assert cleanup.monitor is None
+
+        cleanup.cleanup()
+        # Still only one call — second cleanup sees monitor=None
+        assert monitor.stop.call_count == 1
+
+    def test_temp_files_cleared_after_cleanup(self):
+        """temp_files list should be empty after first cleanup call."""
+        cleanup = qp.PipelineCleanup()
+        p = cleanup.make_temp()
+        assert p.exists()
+        assert len(cleanup.temp_files) == 1
+
+        cleanup.cleanup()
+        assert not p.exists()
+        assert cleanup.temp_files == []
+
+        # Second cleanup is a no-op for temp files
+        cleanup.cleanup()
+        assert cleanup.temp_files == []
+
+    def test_lock_dir_cleared_after_cleanup(self, tmp_path):
+        """lock_dir should be None after first cleanup call."""
+        lock_dir = tmp_path / "quality-pipeline.lock"
+        lock_dir.mkdir()
+
+        cleanup = qp.PipelineCleanup()
+        cleanup.lock_dir = lock_dir
+
+        cleanup.cleanup()
+        assert not lock_dir.exists()
+        assert cleanup.lock_dir is None
+
+        # Second cleanup doesn't touch lock_dir
+        cleanup.cleanup()
+        assert cleanup.lock_dir is None
+
+    def test_full_double_cleanup_no_errors(self, tmp_path):
+        """Full cleanup with all resources should work twice without errors."""
+        lock_dir = tmp_path / "quality-pipeline.lock"
+        lock_dir.mkdir()
+        pid_file = tmp_path / "quality-pipeline.lock.pid"
+        pid_file.write_text("12345")
+
+        cleanup = qp.PipelineCleanup()
+        cleanup.lock_dir = lock_dir
+        cleanup.monitor = MagicMock()
+        p = cleanup.make_temp()
+        cleanup.current_round = "test-round"
+
+        # First cleanup: everything is processed
+        cleanup.cleanup()
+        assert cleanup.monitor is None
+        assert cleanup.temp_files == []
+        assert cleanup.lock_dir is None
+        assert cleanup.current_round == ""
+        assert not p.exists()
+        assert not lock_dir.exists()
+
+        # Second cleanup: no-op, no errors
+        cleanup.cleanup()

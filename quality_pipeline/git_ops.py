@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .output import C
+from .output import C, atomic_write_text
 from .config import ENV_FILES
 
 
@@ -160,7 +160,9 @@ def git_acquire_lock(dry_run: bool) -> Path | None:
                 sys.exit(1)
         # Record PID while still holding the flock, so the next acquirer
         # always sees a valid PID file when it checks _is_lock_stale.
-        pid_file.write_text(str(os.getpid()))
+        # Use atomic write so a crash mid-write can't leave a corrupt PID
+        # file that blocks stale-lock reclamation.
+        atomic_write_text(pid_file, str(os.getpid()))
     finally:
         os.close(acquire_fd)
     return lock_path
