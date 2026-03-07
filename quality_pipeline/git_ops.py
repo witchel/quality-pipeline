@@ -57,6 +57,8 @@ def git_rollback_round(pre_untracked: set[str]) -> None:
     current_untracked = git_untracked_files()
     new_files = current_untracked - pre_untracked
     for f in new_files:
+        if ".." in Path(f).parts:
+            continue  # reject path traversal attempts
         Path(f).unlink(missing_ok=True)
 
 
@@ -138,7 +140,7 @@ def git_acquire_lock(dry_run: bool) -> Path | None:
     # where the second reclaimer destroys the first's freshly-created
     # lock directory.
     acquire_path = Path(git_dir) / "quality-pipeline.acquire"
-    acquire_fd = os.open(str(acquire_path), os.O_CREAT | os.O_RDWR)
+    acquire_fd = os.open(str(acquire_path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(acquire_fd, fcntl.LOCK_EX)
         try:
