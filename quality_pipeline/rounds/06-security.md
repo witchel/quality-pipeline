@@ -1,6 +1,5 @@
 ---
 name: security
-order: 45
 commit_message_prefix: "fix: "
 max_budget_usd: 5.00
 max_turns: 40

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import quality_pipeline as qp
-from tests.conftest import _mock_git_fn
+from conftest import _mock_git_fn
 
 
 # ---------------------------------------------------------------------------

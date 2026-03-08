@@ -33,6 +33,7 @@ class PipelineCleanup:
         self.monitor: ResourceMonitor | None = None
         self.current_round: str = ""
         self.worktree_mode: bool = False
+        self.original_branch: str = ""
         self._activated: bool = False
 
     def activate(self) -> None:
@@ -96,6 +97,11 @@ class PipelineCleanup:
             else:
                 C.warn("Partial changes may remain. Clean up with:")
                 C.warn("  git reset --hard && git clean -fd")
+                if self.original_branch:
+                    C.warn(
+                        f"  To return to your original branch: "
+                        f"git checkout {self.original_branch}"
+                    )
 
     def _cleanup_worktree(self) -> None:
         if not self.worktree_dir:

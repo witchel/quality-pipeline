@@ -74,6 +74,18 @@ class TestRunRound:
         )
         assert result.outcome == qp.RoundOutcome.SOFT_FAILED
 
+    def test_claude_failure_none_gate(
+        self, tmp_path, log_dir, mock_env, monkeypatch
+    ):
+        """gate=none rounds should soft-fail when Claude exits non-zero."""
+        f = tmp_path / "01-none.md"
+        f.write_text("---\nname: none-round\ngate: none\n---\nDo stuff.\n")
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 1)
+        result = qp.run_round(
+            f, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
+        )
+        assert result.outcome == qp.RoundOutcome.SOFT_FAILED
+
     def test_no_changes(self, round_file, log_dir, mock_env, monkeypatch):
         monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
         # git diff --quiet returns 0 (no changes)
@@ -145,6 +157,36 @@ class TestRunRound:
         assert result.outcome == qp.RoundOutcome.PASSED
         assert len(test_attempts) == 2
 
+    def test_retry_reverts_all_changes_returns_no_changes(
+        self, tmp_path, log_dir, mock_env, monkeypatch
+    ):
+        """If retry undoes all changes, commit should be skipped (NO_CHANGES)."""
+        f = tmp_path / "01-retry.md"
+        f.write_text(
+            "---\nname: revert-round\ngate: hard\nmax_retries: 1\n---\nDo stuff.\n"
+        )
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
+        # Initial has_changes check: git diff --quiet returns 1 (changes exist)
+        monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
+
+        test_attempts = []
+        def mock_tests(cmd, output_file, **_kw):
+            test_attempts.append(1)
+            output_file.write_text("FAIL: test_foo")
+            if len(test_attempts) == 1:
+                return 1
+            # After retry, tests pass but changes are gone.
+            # Simulate this by switching git mock so --cached --quiet returns 0.
+            monkeypatch.setattr(
+                qp.pipeline_mod, "git", _mock_git_fn(returncode=0),
+            )
+            return 0
+        monkeypatch.setattr(qp.pipeline_mod, "run_tests_with_tee", mock_tests)
+        result = qp.run_round(
+            f, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
+        )
+        assert result.outcome == qp.RoundOutcome.NO_CHANGES
+
     def test_tests_fail_soft_gate_rollback(
         self, tmp_path, log_dir, mock_env, monkeypatch
     ):
@@ -198,6 +240,53 @@ class TestRunRound:
         )
         assert result.outcome == qp.RoundOutcome.HARD_FAILED
         assert len(rolled_back) == 1
+
+
+class TestRunRoundMonitorCleanup:
+    """Test that the resource monitor is stopped even if _execute_round raises."""
+
+    @pytest.fixture
+    def log_dir(self, tmp_path):
+        d = tmp_path / "logs"
+        d.mkdir()
+        return d
+
+    @pytest.fixture
+    def mock_env(self, monkeypatch):
+        monkeypatch.setattr(qp.pipeline_mod, "git_rev_parse_head", lambda: "abc123")
+        monkeypatch.setattr(qp.pipeline_mod, "git_untracked_files", lambda: set())
+        monkeypatch.setattr(
+            qp.pipeline_mod, "get_resource_snapshot", lambda gpu_type="none": "CPU: ok"
+        )
+        monkeypatch.setattr(
+            qp.pipeline_mod, "run_static_analysis", lambda *a, **_kw: ""
+        )
+        monkeypatch.setattr(qp.ResourceMonitor, "start", lambda self: None)
+        monkeypatch.setattr(qp.ResourceMonitor, "stop", lambda self: None)
+
+    def test_monitor_stopped_on_exception(
+        self, tmp_path, log_dir, mock_env, monkeypatch
+    ):
+        """If _execute_round raises, the monitor should still be stopped."""
+        f = tmp_path / "01-test.md"
+        f.write_text("---\nname: crash-round\ngate: hard\n---\nDo stuff.\n")
+
+        # Make run_claude succeed, then git_commit raise to simulate a crash
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", lambda *a, **_kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "git", _mock_git_fn(returncode=1))
+        monkeypatch.setattr(qp.pipeline_mod, "run_tests_with_tee", lambda *a, **_kw: 0)
+        monkeypatch.setattr(qp.pipeline_mod, "git_stage_round_changes", lambda _pre: None)
+
+        def exploding_commit(_msg):
+            raise RuntimeError("simulated commit failure")
+        monkeypatch.setattr(qp.pipeline_mod, "git_commit", exploding_commit)
+
+        with pytest.raises(RuntimeError, match="simulated commit failure"):
+            qp.run_round(
+                f, 1, 1, "true", qp.PipelineConfig(), None, log_dir, "none"
+            )
+        # Monitor should have been cleaned up by the finally block
+        assert qp.cleanup._cleanup.monitor is None
 
 
 class TestRunRoundWithPreparsedConfig:

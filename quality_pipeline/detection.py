@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import DEFAULT_ANALYZERS, MAX_ANALYSIS_OUTPUT
 
-_ANALYZER_TIMEOUT_SECS = "120"
+_ANALYZER_TIMEOUT_SECS = 120
 
 
 def detect_test_command(project_dir: Path) -> str | None:
@@ -119,9 +119,9 @@ def _run_analyzer(name: str, args: list[str], project_dir: Path,
     # Detect timeout command
     timeout_cmd: list[str] = []
     if shutil.which("gtimeout"):
-        timeout_cmd = ["gtimeout", _ANALYZER_TIMEOUT_SECS]
+        timeout_cmd = ["gtimeout", str(_ANALYZER_TIMEOUT_SECS)]
     elif shutil.which("timeout"):
-        timeout_cmd = ["timeout", _ANALYZER_TIMEOUT_SECS]
+        timeout_cmd = ["timeout", str(_ANALYZER_TIMEOUT_SECS)]
 
     try:
         result = subprocess.run(

@@ -75,6 +75,29 @@ class TestPipelineCleanup:
         combined = captured.err + captured.out
         assert "unchanged" in combined.lower() or "worktree" in combined.lower()
 
+    def test_cleanup_shows_original_branch(self, capsys):
+        """Interrupt message should include original branch when set."""
+        cleanup = qp.PipelineCleanup()
+        cleanup.current_round = "audit-tests"
+        cleanup.worktree_mode = False
+        cleanup.original_branch = "main"
+        cleanup.cleanup()
+        captured = capsys.readouterr()
+        combined = captured.err + captured.out
+        assert "main" in combined
+        assert "checkout" in combined.lower()
+
+    def test_cleanup_no_branch_when_worktree(self, capsys):
+        """Worktree mode should NOT show original branch checkout advice."""
+        cleanup = qp.PipelineCleanup()
+        cleanup.current_round = "audit-tests"
+        cleanup.worktree_mode = True
+        cleanup.original_branch = "main"
+        cleanup.cleanup()
+        captured = capsys.readouterr()
+        combined = captured.err + captured.out
+        assert "checkout" not in combined.lower()
+
 
 class TestActivate:
     def test_registers_atexit_and_signals(self, monkeypatch):

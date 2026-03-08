@@ -14,7 +14,6 @@ from .output import C, atomic_write_text, format_duration, gate_label
 from .config import (
     BRANCH_PREFIX_DEFAULT,
     DEFAULT_SYMLINK_DIRS,
-    DiffStats,
     PipelineConfig,
     RoundConfig,
     RoundOutcome,
@@ -170,6 +169,9 @@ def run_round(
         return result
     finally:
         _cleanup.current_round = ""
+        if _cleanup.monitor:
+            _cleanup.monitor.stop()
+            _cleanup.monitor = None
 
 
 def _execute_round(
@@ -253,7 +255,7 @@ def _execute_round(
 
     if claude_exit != 0:
         C.err(f"Claude exited with code {claude_exit} in round {round_num} ({rc.name})")
-        outcome = RoundOutcome.SOFT_FAILED if rc.gate == "soft" else RoundOutcome.HARD_FAILED
+        outcome = RoundOutcome.HARD_FAILED if rc.gate == "hard" else RoundOutcome.SOFT_FAILED
         return RoundResult(rc.name, outcome, elapsed_seconds=_elapsed())
 
     # Extract change summary from Claude's log output
@@ -352,6 +354,13 @@ def _execute_round(
         git_rollback_round(pre_untracked)
         outcome = RoundOutcome.SOFT_FAILED if rc.gate == "soft" else RoundOutcome.HARD_FAILED
         return RoundResult(rc.name, outcome, elapsed_seconds=_elapsed())
+
+    # Re-verify changes still exist after retries (retry may have reverted everything)
+    still_has_staged = git("diff", "--cached", "--quiet", check=False).returncode != 0
+    still_has_new = bool(git_untracked_files() - pre_untracked)
+    if not still_has_staged and not still_has_new:
+        C.warn(f"No changes remain after retries in round {round_num} ({rc.name})")
+        return RoundResult(rc.name, RoundOutcome.NO_CHANGES, elapsed_seconds=_elapsed())
 
     # Commit
     commit_msg = f"{rc.commit_message_prefix}{rc.name} (round {round_num}/{total_rounds})"
@@ -496,6 +505,12 @@ def pipeline(
     symlink_dirs = (
         worktree_symlinks.split() if worktree_symlinks else DEFAULT_SYMLINK_DIRS
     )
+
+    # Record original branch for cleanup messages (non-worktree mode)
+    if not worktree and not dry_run:
+        _cleanup.original_branch = git(
+            "rev-parse", "--abbrev-ref", "HEAD"
+        ).stdout.strip()
 
     if dry_run:
         C.log(f"[DRY RUN] Would create branch: {branch_name}")

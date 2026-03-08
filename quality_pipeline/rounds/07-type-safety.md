@@ -1,6 +1,5 @@
 ---
 name: type-safety
-order: 55
 commit_message_prefix: "refactor: "
 max_budget_usd: 5.00
 max_turns: 30

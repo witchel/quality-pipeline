@@ -182,6 +182,7 @@ class TestApplyConfigOverrides:
             "test": {
                 "max_budget_usd": 10.0,
                 "max_time_minutes": 25,
+                "max_turns": 50,
                 "gate": "none",
                 "max_retries": 5,
                 "review": True,
@@ -191,6 +192,7 @@ class TestApplyConfigOverrides:
         result = qp.apply_config_overrides(rc, cfg)
         assert result.max_budget_usd == 10.0
         assert result.max_time_minutes == 25
+        assert result.max_turns == 50
         assert result.gate == "none"
         assert result.max_retries == 5
         assert result.review is True
@@ -242,6 +244,20 @@ class TestApplyConfigOverrides:
         cfg = qp.PipelineConfig(overrides={"test": {"review_gate": "hard"}})
         result = qp.apply_config_overrides(rc, cfg)
         assert result.review_gate == "hard"
+
+    def test_max_turns_override(self):
+        """Per-round override should set max_turns."""
+        rc = qp.RoundConfig(name="test", max_turns=30)
+        cfg = qp.PipelineConfig(overrides={"test": {"max_turns": 50}})
+        result = qp.apply_config_overrides(rc, cfg)
+        assert result.max_turns == 50
+
+    def test_max_turns_frontmatter_preserved_without_override(self):
+        """Frontmatter max_turns should be preserved when no override."""
+        rc = qp.RoundConfig(name="test", max_turns=40)
+        cfg = qp.PipelineConfig()
+        result = qp.apply_config_overrides(rc, cfg)
+        assert result.max_turns == 40
 
 
 class TestFinalizeRoundConfig:

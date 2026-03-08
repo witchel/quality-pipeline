@@ -239,6 +239,9 @@ def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConf
     elif rc.max_time_minutes is None and config.max_time_minutes is not None:
         rc.max_time_minutes = config.max_time_minutes
 
+    if "max_turns" in ov:
+        rc.max_turns = int(ov["max_turns"])
+
     if "gate" in ov:
         rc.gate = str(ov["gate"])
     if "max_retries" in ov:

@@ -1,6 +1,5 @@
 ---
 name: fault-tolerance
-order: 27
 commit_message_prefix: "fix: "
 max_budget_usd: 5.00
 max_turns: 30
