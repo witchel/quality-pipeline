@@ -12,8 +12,8 @@ import sys
 import threading
 from pathlib import Path
 
-from .output import C
-from .config import TEMPLATE_DIR, RoundConfig
+from .output import C, format_duration
+from .config import TEMPLATE_DIR, RoundConfig, RoundOutcome, RoundResult
 from .git_ops import git
 
 REVIEWER_BUDGET_USD = 1.00
@@ -287,3 +287,136 @@ def run_reviewer(
     else:
         C.warn(f"Reviewer: could not parse verdict — see {review_output}")
     return verdict
+
+
+# ---------------------------------------------------------------------------
+# Meta-review
+# ---------------------------------------------------------------------------
+
+META_REVIEW_BUDGET_USD = 1.50
+META_REVIEW_MAX_TURNS = 5
+META_REVIEW_TIMEOUT_MINUTES = 10
+
+
+def run_meta_review(
+    results: list[RoundResult],
+    branch_name: str,
+    log_dir: Path,
+    pipeline_elapsed: int,
+) -> Path | None:
+    """Run meta-review of entire pipeline run. Returns output path or None."""
+    template_file = TEMPLATE_DIR / "meta-reviewer.md"
+    if not template_file.exists():
+        C.warn(f"Meta-reviewer template not found: {template_file} — skipping")
+        return None
+
+    C.log("Running meta-review of pipeline run...")
+
+    # Build summary context for the meta-reviewer
+    lines = [
+        f"Branch: {branch_name}",
+        f"Total time: {format_duration(pipeline_elapsed)}",
+        "",
+        "Per-round results:",
+    ]
+    for i, r in enumerate(results):
+        if r.outcome == RoundOutcome.SKIPPED:
+            continue
+        parts = [f"  {i + 1}. {r.name}: {r.outcome.value}"]
+        if r.elapsed_seconds:
+            parts.append(format_duration(r.elapsed_seconds))
+        if r.diff_stats and r.diff_stats.stat_summary:
+            parts.append(r.diff_stats.stat_summary)
+        if r.commit_sha:
+            parts.append(r.commit_sha)
+        if r.reviewer_verdict:
+            parts.append(f"review:{r.reviewer_verdict}")
+        lines.append("  ".join(parts))
+        if r.change_summary:
+            lines.append(f"     {r.change_summary}")
+
+    summary_text = "\n".join(lines)
+
+    # Collect per-round stat details
+    stat_sections: list[str] = []
+    for r in results:
+        if r.diff_stats and r.diff_stats.stat_detail:
+            stat_sections.append(f"### {r.name}\n```\n{r.diff_stats.stat_detail}\n```")
+
+    # Collect per-round reviewer output
+    review_sections: list[str] = []
+    for review_file in sorted(log_dir.glob("review-round-*.json")):
+        try:
+            raw = review_file.read_text()
+            outer = json.loads(raw)
+            if isinstance(outer, dict) and "result" in outer:
+                raw = outer["result"]
+            review_sections.append(f"### {review_file.name}\n```json\n{raw}\n```")
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    # Build prompt from template
+    context_parts = [summary_text]
+    if stat_sections:
+        context_parts.append("\n## Per-round diff stats\n" + "\n".join(stat_sections))
+    if review_sections:
+        context_parts.append("\n## Per-round reviewer output\n" + "\n".join(review_sections))
+
+    full_context = "\n".join(context_parts)
+    prompt = template_file.read_text().replace("CONTEXT_PLACEHOLDER", full_context)
+
+    meta_output = log_dir / "meta-review.json"
+    cmd = [
+        "claude", "-p", prompt,
+        "--dangerously-skip-permissions",
+        "--max-budget-usd", f"{META_REVIEW_BUDGET_USD:.2f}",
+        "--max-turns", str(META_REVIEW_MAX_TURNS),
+        "--output-format", "json",
+    ]
+    exit_code, timed_out = _run_claude_process(
+        cmd, meta_output, META_REVIEW_TIMEOUT_MINUTES,
+    )
+    if timed_out:
+        C.warn(f"Meta-review timed out after {META_REVIEW_TIMEOUT_MINUTES}m")
+        return None
+    C.log(f"Meta-review claude finished (exit {exit_code})")
+
+    # Print key findings
+    if meta_output.exists():
+        _print_meta_review_findings(meta_output)
+
+    return meta_output
+
+
+def _print_meta_review_findings(output_file: Path) -> None:
+    """Print a summary of meta-review findings."""
+    try:
+        raw = output_file.read_text()
+    except OSError:
+        return
+    # Unwrap claude JSON wrapper
+    try:
+        outer = json.loads(raw)
+        if isinstance(outer, dict) and "result" in outer:
+            raw = outer["result"]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Strip code fences
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = [line for line in text.split("\n") if not line.startswith("```")]
+        text = "\n".join(lines)
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        C.warn("Could not parse meta-review output")
+        return
+
+    if data.get("overall_assessment"):
+        C.log(f"  {C.BOLD}Assessment:{C.NC} {data['overall_assessment']}")
+    for rec in data.get("recommendations", []):
+        C.log(f"  \u2022 {rec}")
+    for lv in data.get("low_value_rounds", []):
+        C.warn(f"  Low-value: {lv}")
+    for sv in data.get("scope_violations", []):
+        C.warn(f"  Scope violation: {sv}")

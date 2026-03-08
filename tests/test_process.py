@@ -472,3 +472,103 @@ class TestRunReviewer:
             1, qp.RoundConfig(name="test", review=True), "abc", log_dir, None,
         )
         assert result is None
+
+
+class TestRunMetaReview:
+    def test_runs_and_saves_output(self, tmp_path, monkeypatch):
+        """run_meta_review should invoke claude and save output."""
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "meta-reviewer.md").write_text("Review this: CONTEXT_PLACEHOLDER")
+
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        meta_output = json.dumps({
+            "low_value_rounds": [],
+            "recommendations": ["Merge audit and security rounds"],
+            "overall_assessment": "Good run",
+        })
+
+        def mock_popen(*args, **_kwargs):
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO(meta_output)
+            proc.stderr = io.StringIO("")
+            proc.returncode = 0
+            proc.wait.return_value = 0
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        results = [
+            qp.RoundResult("audit", qp.RoundOutcome.PASSED, elapsed_seconds=120),
+            qp.RoundResult("refactor", qp.RoundOutcome.NO_CHANGES, elapsed_seconds=45),
+        ]
+        output = qp.run_meta_review(results, "quality/test", log_dir, 165)
+        assert output is not None
+        assert output.exists()
+        assert output.name == "meta-review.json"
+
+    def test_missing_template_returns_none(self, tmp_path, monkeypatch):
+        """Should return None when template is missing."""
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path / "nonexistent")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        result = qp.run_meta_review([], "quality/test", log_dir, 100)
+        assert result is None
+
+    def test_timeout_returns_none(self, tmp_path, monkeypatch):
+        """Timeout should return None."""
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "meta-reviewer.md").write_text("Review: CONTEXT_PLACEHOLDER")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        class InstantTimer:
+            def __init__(self, _interval, function):
+                self._fn = function
+            def start(self):
+                self._fn()
+            def cancel(self):
+                pass
+
+        monkeypatch.setattr(threading, "Timer", InstantTimer)
+        def mock_popen(*args, **_kwargs):
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO("")
+            proc.stderr = io.StringIO("")
+            proc.returncode = -9
+            proc.wait.return_value = -9
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        result = qp.run_meta_review(
+            [qp.RoundResult("test", qp.RoundOutcome.PASSED)],
+            "quality/test", log_dir, 100,
+        )
+        assert result is None
+
+
+class TestPrintMetaReviewFindings:
+    def test_parses_and_prints(self, tmp_path, capsys):
+        """Should parse JSON findings and print them."""
+        output = tmp_path / "meta-review.json"
+        output.write_text(json.dumps({
+            "low_value_rounds": ["simplify: trivial changes"],
+            "recommendations": ["Increase security round budget"],
+            "overall_assessment": "Efficient run overall",
+            "scope_violations": [],
+        }))
+        qp._print_meta_review_findings(output)
+        captured = capsys.readouterr().out
+        assert "Efficient run overall" in captured
+        assert "Increase security round budget" in captured
+        assert "simplify" in captured
+
+    def test_handles_unparseable(self, tmp_path, capsys):
+        """Should handle non-JSON output gracefully."""
+        output = tmp_path / "meta-review.json"
+        output.write_text("not valid json")
+        qp._print_meta_review_findings(output)
+        captured = capsys.readouterr().out
+        assert "Could not parse" in captured

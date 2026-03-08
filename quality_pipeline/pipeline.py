@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from .output import C, atomic_write_text, format_duration, gate_label
 from .config import (
     BRANCH_PREFIX_DEFAULT,
     DEFAULT_SYMLINK_DIRS,
+    DiffStats,
     PipelineConfig,
     RoundConfig,
     RoundOutcome,
@@ -33,6 +35,7 @@ from .git_ops import (
     git_acquire_lock,
     git_commit,
     git_create_branch,
+    git_diff_stats,
     git_has_uncommitted,
     git_rev_parse_head,
     git_rollback_round,
@@ -40,12 +43,73 @@ from .git_ops import (
     git_untracked_files,
     setup_worktree,
 )
-from .process import run_claude, run_reviewer, run_tests_with_tee
+from .process import run_claude, run_meta_review, run_reviewer, run_tests_with_tee
 from .cleanup import _cleanup
 
 _MIN_TEST_TIMEOUT_SECS = 60
 _TEST_FAILURE_TAIL_LINES = 100
 _MIN_RETRY_BUDGET_USD = 1.0
+
+_CHANGES_SUMMARY_PREFIX = "CHANGES_SUMMARY:"
+
+
+def _extract_change_summary(log_file: Path) -> str:
+    """Extract Claude's self-reported change summary from its log output."""
+    try:
+        raw = log_file.read_text()
+    except OSError:
+        return ""
+    # Unwrap claude JSON output wrapper: {"result": "..."}
+    try:
+        outer = json.loads(raw)
+        if isinstance(outer, dict) and "result" in outer:
+            raw = outer["result"]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_CHANGES_SUMMARY_PREFIX):
+            return stripped[len(_CHANGES_SUMMARY_PREFIX):].strip()
+    return ""
+
+
+def _print_round_result(round_num: int, total: int, result: RoundResult) -> None:
+    """Print a live per-round completion banner."""
+    outcome_icons = {
+        RoundOutcome.PASSED: f"{C.GREEN}\u2713{C.NC}",
+        RoundOutcome.NO_CHANGES: f"{C.BLUE}\u2014{C.NC}",
+        RoundOutcome.SOFT_FAILED: f"{C.YELLOW}\u2717{C.NC}",
+        RoundOutcome.HARD_FAILED: f"{C.RED}\u2717{C.NC}",
+        RoundOutcome.SKIPPED: "\u2014",
+    }
+    outcome_labels = {
+        RoundOutcome.PASSED: f"{C.GREEN}passed{C.NC}",
+        RoundOutcome.NO_CHANGES: f"{C.BLUE}no-changes{C.NC}",
+        RoundOutcome.SOFT_FAILED: f"{C.YELLOW}soft-failed{C.NC}",
+        RoundOutcome.HARD_FAILED: f"{C.RED}HARD-FAILED{C.NC}",
+        RoundOutcome.SKIPPED: "skipped",
+    }
+
+    icon = outcome_icons.get(result.outcome, "?")
+    label = outcome_labels.get(result.outcome, result.outcome.value)
+    timing = format_duration(result.elapsed_seconds) if result.elapsed_seconds else ""
+
+    parts = [f"  {icon} {result.name}", label]
+    if timing:
+        parts.append(timing)
+    if result.diff_stats and result.diff_stats.stat_summary:
+        parts.append(result.diff_stats.stat_summary)
+    if result.commit_sha:
+        parts.append(result.commit_sha)
+    if result.reviewer_verdict:
+        parts.append(f"review:{result.reviewer_verdict}")
+
+    print()
+    C.log("\u2504" * 60)
+    C.log("  ".join(parts))
+    if result.change_summary:
+        C.log(f"    {result.change_summary}")
+    C.log("\u2504" * 60)
 
 
 def _remaining_seconds(round_start: float, max_minutes: int) -> int:
@@ -89,8 +153,8 @@ def run_round(
     log_dir: Path,
     gpu_type: str,
     rc: RoundConfig | None = None,
-) -> RoundOutcome:
-    """Execute a single pipeline round. Returns the outcome."""
+) -> RoundResult:
+    """Execute a single pipeline round. Returns a RoundResult."""
     round_start = time.time()
     pre_sha = git_rev_parse_head()
 
@@ -98,10 +162,12 @@ def run_round(
         rc = apply_config_overrides(parse_frontmatter(round_file), config)
     _cleanup.current_round = rc.name
     try:
-        return _execute_round(
+        result = _execute_round(
             round_file, round_num, total_rounds, test_cmd, config,
             review_flag, log_dir, gpu_type, rc, round_start, pre_sha,
         )
+        _print_round_result(round_num, total_rounds, result)
+        return result
     finally:
         _cleanup.current_round = ""
 
@@ -118,7 +184,7 @@ def _execute_round(
     rc: RoundConfig,
     round_start: float,
     pre_sha: str,
-) -> RoundOutcome:
+) -> RoundResult:
     """Inner round execution: prompt, Claude, tests, commit."""
     # _finalize_round_config guarantees these are set
     assert rc.max_budget_usd is not None
@@ -141,7 +207,11 @@ def _execute_round(
         f"Do not do work that belongs to other rounds.\n"
         f"If the prompt includes a Behavior Contract section, you MUST follow it "
         f"strictly. Items under MUST change are required fixes. Items under MUST NOT "
-        f"change are hard constraints."
+        f"change are hard constraints.\n"
+        f"After completing all your work, output a final line starting with "
+        f"CHANGES_SUMMARY: followed by a brief (under 80 chars) description of "
+        f"the most important changes you made. Example: "
+        f"CHANGES_SUMMARY: Fixed TOCTTOU race in lock acquisition; added atomic PID write"
     )
 
     # Run static analysis
@@ -178,20 +248,16 @@ def _execute_round(
     monitor.stop()
     _cleanup.monitor = None
 
-    def _finish(status: str) -> None:
-        elapsed = int(time.time() - round_start)
-        snapshot = get_resource_snapshot(gpu_type)
-        C.log(
-            f"Round {C.BOLD}{rc.name}{C.NC} {status} in "
-            f"{format_duration(elapsed)} | {snapshot}"
-        )
+    def _elapsed() -> int:
+        return int(time.time() - round_start)
 
     if claude_exit != 0:
         C.err(f"Claude exited with code {claude_exit} in round {round_num} ({rc.name})")
-        _finish("failed")
-        if rc.gate == "soft":
-            return RoundOutcome.SOFT_FAILED
-        return RoundOutcome.HARD_FAILED
+        outcome = RoundOutcome.SOFT_FAILED if rc.gate == "soft" else RoundOutcome.HARD_FAILED
+        return RoundResult(rc.name, outcome, elapsed_seconds=_elapsed())
+
+    # Extract change summary from Claude's log output
+    change_summary = _extract_change_summary(claude_log)
 
     # Check if any files changed
     has_changes = (
@@ -202,8 +268,7 @@ def _execute_round(
 
     if not has_changes:
         C.warn(f"No changes made in round {round_num} ({rc.name}) — skipping commit")
-        _finish("no changes")
-        return RoundOutcome.NO_CHANGES
+        return RoundResult(rc.name, RoundOutcome.NO_CHANGES, elapsed_seconds=_elapsed())
 
     # Stage changes
     git_stage_round_changes(pre_untracked)
@@ -213,10 +278,19 @@ def _execute_round(
         commit_msg = f"{rc.commit_message_prefix}{rc.name} (round {round_num}/{total_rounds})"
         git_commit(commit_msg)
         C.ok(f"Committed: {commit_msg} (gate=none, tests skipped)")
+        post_sha = git_rev_parse_head()
+        short_sha = git("rev-parse", "--short", "HEAD").stdout.strip()
+        diff_st = git_diff_stats(pre_sha, post_sha)
         verdict = run_reviewer(round_num, rc, pre_sha, log_dir, review_flag)
         outcome = _check_review_verdict(verdict, rc)
-        _finish("passed" if outcome == RoundOutcome.PASSED else "review-failed")
-        return outcome
+        return RoundResult(
+            rc.name, outcome,
+            elapsed_seconds=_elapsed(),
+            diff_stats=diff_st,
+            commit_sha=short_sha,
+            reviewer_verdict=verdict or "",
+            change_summary=change_summary,
+        )
 
     # --- Test + retry loop ---
     test_output_file = _cleanup.make_temp()
@@ -276,21 +350,29 @@ def _execute_round(
         )
         C.err("Rolling back changes from this round...")
         git_rollback_round(pre_untracked)
-        _finish("tests failed")
-        if rc.gate == "soft":
-            return RoundOutcome.SOFT_FAILED
-        return RoundOutcome.HARD_FAILED
+        outcome = RoundOutcome.SOFT_FAILED if rc.gate == "soft" else RoundOutcome.HARD_FAILED
+        return RoundResult(rc.name, outcome, elapsed_seconds=_elapsed())
 
     # Commit
     commit_msg = f"{rc.commit_message_prefix}{rc.name} (round {round_num}/{total_rounds})"
     git_commit(commit_msg)
     C.ok(f"Committed: {commit_msg}")
 
+    post_sha = git_rev_parse_head()
+    short_sha = git("rev-parse", "--short", "HEAD").stdout.strip()
+    diff_st = git_diff_stats(pre_sha, post_sha)
+
     # Run reviewer — verdict may downgrade the round outcome
     verdict = run_reviewer(round_num, rc, pre_sha, log_dir, review_flag)
     outcome = _check_review_verdict(verdict, rc)
-    _finish("passed" if outcome == RoundOutcome.PASSED else "review-failed")
-    return outcome
+    return RoundResult(
+        rc.name, outcome,
+        elapsed_seconds=_elapsed(),
+        diff_stats=diff_st,
+        commit_sha=short_sha,
+        reviewer_verdict=verdict or "",
+        change_summary=change_summary,
+    )
 
 
 def pipeline(
@@ -304,6 +386,7 @@ def pipeline(
     test_command: str | None,
     review_flag: bool | None,
     log_dir_arg: str | None,
+    meta_review: bool = False,
 ) -> None:
     """Main pipeline orchestrator."""
     _cleanup.activate()
@@ -507,6 +590,8 @@ def pipeline(
             C.log(f"[DRY RUN] Gate: {rc.gate} | Max retries: {rc.max_retries}")
             C.log(f"[DRY RUN] Review: {review_status} | Analyzers: {analyzers_status}")
 
+        if meta_review:
+            C.log("[DRY RUN] Would run meta-review after pipeline completes")
         C.ok("Dry run complete. No changes made.")
         return
 
@@ -521,20 +606,20 @@ def pipeline(
             results.append(RoundResult(rc.name, RoundOutcome.SKIPPED))
             continue
 
-        outcome = run_round(
+        result = run_round(
             rf, n, total, effective_test_cmd, config, review_flag, log_dir, gpu_type,
             rc=rc,
         )
 
-        results.append(RoundResult(rc.name, outcome))
+        results.append(result)
 
-        if outcome == RoundOutcome.HARD_FAILED:
+        if result.outcome == RoundOutcome.HARD_FAILED:
             C.err(f"Pipeline stopped at round {n} (hard gate failure).")
             if n < total:
                 C.warn(f"Resume with: quality-pipeline --start-from {n + 1}")
             break
 
-        if outcome == RoundOutcome.SOFT_FAILED:
+        if result.outcome == RoundOutcome.SOFT_FAILED:
             C.warn(f"Round {n} failed (soft gate) — continuing to next round.")
 
     # --- Summary ---
@@ -547,7 +632,6 @@ def pipeline(
     C.log(f"Resources: {get_resource_snapshot(gpu_type)}")
     print()
 
-    C.log(f"{C.BOLD}Per-round results:{C.NC}")
     outcome_colors = {
         RoundOutcome.PASSED: f"{C.GREEN}passed{C.NC}",
         RoundOutcome.NO_CHANGES: f"{C.BLUE}no-changes{C.NC}",
@@ -560,8 +644,22 @@ def pipeline(
     soft_failed = sum(1 for r in results if r.outcome == RoundOutcome.SOFT_FAILED)
     skipped = sum(1 for r in results if r.outcome == RoundOutcome.SKIPPED)
 
+    C.log(f"{C.BOLD}Per-round results:{C.NC}")
     for i, r in enumerate(results):
-        C.log(f"  {i + 1}. {r.name}: {outcome_colors.get(r.outcome, str(r.outcome.value))}")
+        label = outcome_colors.get(r.outcome, r.outcome.value)
+        timing = format_duration(r.elapsed_seconds) if r.elapsed_seconds else ""
+        parts = [f"  {i + 1}. {r.name:<20s} {label}"]
+        if timing:
+            parts.append(timing)
+        if r.diff_stats and r.diff_stats.stat_summary:
+            parts.append(r.diff_stats.stat_summary)
+        if r.commit_sha:
+            parts.append(r.commit_sha)
+        if r.reviewer_verdict:
+            parts.append(f"review:{r.reviewer_verdict}")
+        C.log("  ".join(parts))
+        if r.change_summary:
+            C.log(f"     {r.change_summary}")
 
     print()
     C.ok(f"Passed: {passed}")
@@ -572,12 +670,27 @@ def pipeline(
     if hard_failed > 0:
         C.err(f"Hard failures: {hard_failed} (stopped pipeline)")
 
+    # Time breakdown
+    active_results = [r for r in results if r.outcome != RoundOutcome.SKIPPED]
+    if pipeline_elapsed > 0 and active_results:
+        time_parts = []
+        for r in active_results:
+            pct = (r.elapsed_seconds / pipeline_elapsed * 100) if pipeline_elapsed else 0
+            time_parts.append(f"{r.name} {pct:.0f}%")
+        C.log(f"Time: {' | '.join(time_parts)}")
+
     print()
     C.log(f"{C.BOLD}Log directory: {log_dir}{C.NC}")
     for lf in sorted(log_dir.glob("*")):
         if lf.suffix in (".log", ".json", ".txt"):
             C.log(f"  {lf}")
     C.log("\u2501" * 60)
+
+    # Meta-review
+    if meta_review:
+        meta_output = run_meta_review(results, branch_name, log_dir, pipeline_elapsed)
+        if meta_output:
+            C.ok(f"Meta-review saved to: {meta_output}")
 
     if any(r.outcome == RoundOutcome.HARD_FAILED for r in results):
         sys.exit(1)

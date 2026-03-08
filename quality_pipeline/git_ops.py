@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 from .output import C, atomic_write_text
-from .config import ENV_FILES
+from .config import DiffStats, ENV_FILES
 
 
 def git(*args: str, capture: bool = True, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -25,6 +25,44 @@ def git(*args: str, capture: bool = True, check: bool = True) -> subprocess.Comp
 
 def git_rev_parse_head() -> str:
     return git("rev-parse", "HEAD").stdout.strip()
+
+
+def git_diff_stats(pre_sha: str, post_sha: str) -> DiffStats:
+    """Compact diff statistics between two commits."""
+    files_changed = 0
+    insertions = 0
+    deletions = 0
+
+    # --numstat gives machine-readable line counts
+    numstat = git("diff", "--numstat", pre_sha, post_sha, check=False)
+    for line in (numstat.stdout or "").strip().splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        added, removed = parts[0], parts[1]
+        # Binary files show "-" for both columns
+        if added != "-":
+            insertions += int(added)
+        if removed != "-":
+            deletions += int(removed)
+        files_changed += 1
+
+    # --stat gives the human-readable per-file breakdown
+    stat_result = git("diff", "--stat", pre_sha, post_sha, check=False)
+    stat_detail = (stat_result.stdout or "").strip()
+
+    if files_changed:
+        stat_summary = f"{files_changed} file{'s' if files_changed != 1 else ''}, +{insertions}/-{deletions}"
+    else:
+        stat_summary = ""
+
+    return DiffStats(
+        files_changed=files_changed,
+        insertions=insertions,
+        deletions=deletions,
+        stat_summary=stat_summary,
+        stat_detail=stat_detail,
+    )
 
 
 def git_has_uncommitted() -> bool:

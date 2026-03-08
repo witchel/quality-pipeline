@@ -81,9 +81,23 @@ class RoundOutcome(Enum):
 
 
 @dataclass
+class DiffStats:
+    files_changed: int = 0
+    insertions: int = 0
+    deletions: int = 0
+    stat_summary: str = ""   # e.g. "3 files, +42/-18"
+    stat_detail: str = ""    # full git diff --stat output
+
+
+@dataclass
 class RoundResult:
     name: str
     outcome: RoundOutcome
+    elapsed_seconds: int = 0
+    diff_stats: DiffStats | None = None
+    commit_sha: str = ""
+    reviewer_verdict: str = ""
+    change_summary: str = ""
 
 
 # ---------------------------------------------------------------------------

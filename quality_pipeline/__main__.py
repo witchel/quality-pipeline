@@ -24,6 +24,10 @@ from .pipeline import pipeline
 @click.option("--test-command", default=None, help="Override auto-detected test command")
 @click.option("--review/--no-review", default=None, help="Force reviewer pass on/off")
 @click.option("--log-dir", default=None, help="Directory for log files")
+@click.option(
+    "--meta-review", is_flag=True, default=False,
+    help="Run a meta-review of the entire pipeline at the end",
+)
 def cli(
     project_dir: str | None,
     rounds: str | None,
@@ -35,6 +39,7 @@ def cli(
     test_command: str | None,
     review: bool | None,
     log_dir: str | None,
+    meta_review: bool,
 ) -> None:
     """Multi-round automated code quality pipeline.
 
@@ -57,6 +62,7 @@ def cli(
         test_command=test_command,
         review_flag=review,
         log_dir_arg=log_dir,
+        meta_review=meta_review,
     )
 
 

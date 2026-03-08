@@ -424,6 +424,38 @@ class TestRoundOutcome:
         assert r.name == "test"
         assert r.outcome == qp.RoundOutcome.PASSED
 
+    def test_round_result_new_fields_default(self):
+        """New enriched fields should have sensible defaults."""
+        r = qp.RoundResult("test", qp.RoundOutcome.PASSED)
+        assert r.elapsed_seconds == 0
+        assert r.diff_stats is None
+        assert r.commit_sha == ""
+        assert r.reviewer_verdict == ""
+        assert r.change_summary == ""
+
+    def test_diff_stats_defaults(self):
+        ds = qp.DiffStats()
+        assert ds.files_changed == 0
+        assert ds.insertions == 0
+        assert ds.deletions == 0
+        assert ds.stat_summary == ""
+        assert ds.stat_detail == ""
+
+    def test_round_result_with_all_fields(self):
+        ds = qp.DiffStats(
+            files_changed=3, insertions=42, deletions=18,
+            stat_summary="3 files, +42/-18",
+        )
+        r = qp.RoundResult(
+            "audit", qp.RoundOutcome.PASSED,
+            elapsed_seconds=134, diff_stats=ds, commit_sha="abc1234",
+            reviewer_verdict="pass", change_summary="Fixed race condition",
+        )
+        assert r.elapsed_seconds == 134
+        assert r.diff_stats.files_changed == 3
+        assert r.commit_sha == "abc1234"
+        assert r.change_summary == "Fixed race condition"
+
 
 class TestDiscoverRounds:
     def test_finds_md_files_sorted(self, tmp_path, monkeypatch):

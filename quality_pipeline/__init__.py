@@ -34,6 +34,7 @@ from .config import (
     RoundConfig as RoundConfig,
     PipelineConfig as PipelineConfig,
     RoundOutcome as RoundOutcome,
+    DiffStats as DiffStats,
     RoundResult as RoundResult,
     _parse_review_bool as _parse_review_bool,
     parse_frontmatter as parse_frontmatter,
@@ -57,6 +58,7 @@ from .detection import detect_test_command as detect_test_command, _run_analyzer
 from .git_ops import (
     git as git,
     git_rev_parse_head as git_rev_parse_head,
+    git_diff_stats as git_diff_stats,
     git_has_uncommitted as git_has_uncommitted,
     git_untracked_files as git_untracked_files,
     git_stage_round_changes as git_stage_round_changes,
@@ -81,11 +83,15 @@ from .process import (
     run_claude as run_claude,
     _parse_verdict as _parse_verdict,
     run_reviewer as run_reviewer,
+    run_meta_review as run_meta_review,
+    _print_meta_review_findings as _print_meta_review_findings,
 )
 
 # --- pipeline.py ---
 from .pipeline import (
+    _extract_change_summary as _extract_change_summary,
     _print_round_header as _print_round_header,
+    _print_round_result as _print_round_result,
     _check_review_verdict as _check_review_verdict,
     run_round as run_round,
     pipeline as pipeline,

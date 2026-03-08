@@ -344,3 +344,71 @@ class TestSetupWorktree:
 
         qp.setup_worktree("quality/test", [])
         assert Path.cwd() == wt_path
+
+
+class TestGitDiffStats:
+    def test_parses_numstat_and_stat(self, monkeypatch):
+        """Should parse --numstat for counts and --stat for detail."""
+        numstat_output = "10\t3\tpipeline.py\n5\t2\tconfig.py\n"
+        stat_output = " pipeline.py | 13 ++++---\n config.py   |  7 ++--\n"
+        calls = []
+        def mock_git(*args, **kwargs):
+            calls.append(args)
+            r = MagicMock()
+            r.returncode = 0
+            if "--numstat" in args:
+                r.stdout = numstat_output
+            elif "--stat" in args:
+                r.stdout = stat_output
+            else:
+                r.stdout = ""
+            return r
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+        ds = qp.git_diff_stats("abc", "def")
+        assert ds.files_changed == 2
+        assert ds.insertions == 15
+        assert ds.deletions == 5
+        assert ds.stat_summary == "2 files, +15/-5"
+        assert "pipeline.py" in ds.stat_detail
+
+    def test_empty_diff(self, monkeypatch):
+        """No changes should return zeroed DiffStats."""
+        monkeypatch.setattr(qp.git_ops, "git", _mock_git_fn(stdout=""))
+        ds = qp.git_diff_stats("abc", "def")
+        assert ds.files_changed == 0
+        assert ds.insertions == 0
+        assert ds.deletions == 0
+        assert ds.stat_summary == ""
+
+    def test_binary_files(self, monkeypatch):
+        """Binary files show '-' in numstat; should count file but not lines."""
+        calls = []
+        def mock_git(*args, **kwargs):
+            calls.append(args)
+            r = MagicMock()
+            r.returncode = 0
+            if "--numstat" in args:
+                r.stdout = "-\t-\timage.png\n5\t2\tcode.py\n"
+            else:
+                r.stdout = ""
+            return r
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+        ds = qp.git_diff_stats("abc", "def")
+        assert ds.files_changed == 2
+        assert ds.insertions == 5
+        assert ds.deletions == 2
+
+    def test_single_file(self, monkeypatch):
+        """Single file change should not pluralize."""
+        calls = []
+        def mock_git(*args, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            if "--numstat" in args:
+                r.stdout = "8\t3\tpipeline.py\n"
+            else:
+                r.stdout = ""
+            return r
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+        ds = qp.git_diff_stats("abc", "def")
+        assert ds.stat_summary == "1 file, +8/-3"

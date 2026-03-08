@@ -39,6 +39,10 @@ Or without installing, using `uv run` from the quality-pipeline repo:
 uv run quality-pipeline --project-dir /path/to/your/project
 ```
 
+**Important:** `uv run` changes the working directory to the quality-pipeline repo,
+so `--project-dir` is required when targeting another project. Without it, the
+pipeline runs on itself rather than your intended target.
+
 When invoked from within a Claude Code session, the pipeline automatically unsets `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` before spawning `claude -p` subprocesses, so they don't fail with a recursive-run detection error.
 
 ## Options
