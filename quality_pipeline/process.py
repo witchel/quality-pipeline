@@ -23,11 +23,16 @@ REVIEWER_MAX_DIFF_CHARS = 8000
 
 
 def _kill_process_group(proc: subprocess.Popen[str], graceful_wait: float = 2.0) -> None:
-    """Kill a process and its entire process group.
+    """Kill a process and its entire process group, then close pipes.
 
     Requires the process to have been started with ``start_new_session=True``
     so it has its own process group.  Sends SIGTERM first, then SIGKILL if
     the process doesn't exit within *graceful_wait* seconds.
+
+    After killing, closes stdout/stderr pipes so that any thread blocked on
+    ``for line in proc.stdout`` is unblocked.  Without this, child processes
+    that survive the kill (different process group) keep the pipe open and
+    the reader blocks forever.
     """
     if proc.pid is None or proc.pid <= 0:
         return
@@ -42,6 +47,13 @@ def _kill_process_group(proc: subprocess.Popen[str], graceful_wait: float = 2.0)
             os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
             pass
+    # Close pipes to unblock any threads reading from them.
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except OSError:
+                pass
 
 
 def run_tests_with_tee(
@@ -84,16 +96,25 @@ def run_tests_with_tee(
     try:
         with output_file.open("w") as fout:
             if proc.stdout is not None:
-                for line in proc.stdout:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
-                    fout.write(line)
+                try:
+                    for line in proc.stdout:
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+                        fout.write(line)
+                except ValueError:
+                    pass  # Pipe closed by timeout handler
             fout.flush()
             os.fsync(fout.fileno())
-        proc.wait()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
     except BaseException:
         _kill_process_group(proc)
-        proc.wait()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
         raise
     finally:
         if timer is not None:
@@ -147,23 +168,35 @@ def _run_claude_process(
         with output_file.open("w") as fout:
             def _tee_stderr() -> None:
                 assert proc.stderr is not None
-                for line in proc.stderr:
-                    sys.stderr.write(line)
-                    sys.stderr.flush()
+                try:
+                    for line in proc.stderr:
+                        sys.stderr.write(line)
+                        sys.stderr.flush()
+                except ValueError:
+                    pass  # Pipe closed by timeout handler
 
             stderr_thread = threading.Thread(target=_tee_stderr, daemon=True)
             stderr_thread.start()
 
             if proc.stdout is not None:
-                for line in proc.stdout:
-                    fout.write(line)
+                try:
+                    for line in proc.stdout:
+                        fout.write(line)
+                except ValueError:
+                    pass  # Pipe closed by timeout handler
 
             fout.flush()
             os.fsync(fout.fileno())
-            proc.wait()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(proc)
     except BaseException:
         _kill_process_group(proc)
-        proc.wait()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
         raise
     finally:
         if timer is not None:
