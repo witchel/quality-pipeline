@@ -40,8 +40,14 @@ Respond with a JSON object (and nothing else) in this exact format:
 ```
 
 **Verdict rules:**
-- `pass`: No issues, or only informational notes
+- `pass`: No issues found that need action
 - `warn`: Issues found that deserve attention but don't indicate breakage
 - `critical`: Issues that likely indicate bugs, contract violations, or serious regressions
+
+**Calibration — keep the bar high:**
+- Only report issues that would warrant a code change or a follow-up investigation. If the code is correct and the observation is "this is fine but worth noting," don't report it.
+- Do NOT report: defensive coding that's unnecessary but harmless, platform portability concerns for single-platform projects, correct behavior that "could theoretically" be a problem in an unlikely scenario, or observations that amount to "I verified this is correct."
+- The `info` severity exists but should be rare. If you find yourself writing mostly `info`-level issues, the diff is probably fine — return `pass` with an empty issues list.
+- A `pass` verdict with zero issues is the expected outcome for a clean round. Don't manufacture observations to fill the issues list.
 
 If no issues are found, return `{"verdict": "pass", "issues": [], "summary": "No issues found."}`.
