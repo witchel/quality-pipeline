@@ -6,6 +6,7 @@ max_turns: 20
 max_time_minutes: 10
 gate: soft
 max_retries: 1
+review: true
 ---
 
 # Remove Dead Code
@@ -37,6 +38,9 @@ You are a dead code elimination specialist. Your goal is to find and remove code
 ## What NOT to do
 
 - Don't refactor or rewrite code — just remove what's dead
+- Don't add type annotations — that's the type-safety round's job (round 7)
+- Don't add new imports that weren't there before
+- Don't rename variables, reformat code, or change whitespace
 - Don't remove TODO/FIXME comments — those indicate future work, not dead code
 - Don't remove type definitions, interfaces, or protocols that may be used for type checking
 - Don't remove logging or debugging utilities that are intentionally available but not always active
