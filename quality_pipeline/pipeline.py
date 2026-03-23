@@ -42,7 +42,14 @@ from .git_ops import (
     git_untracked_files,
     setup_worktree,
 )
-from .process import run_claude, run_meta_review, run_reviewer, run_tests_with_tee
+from .process import (
+    is_auth_error,
+    preflight_auth_check,
+    run_claude,
+    run_meta_review,
+    run_reviewer,
+    run_tests_with_tee,
+)
 from .cleanup import _cleanup
 
 _MIN_TEST_TIMEOUT_SECS = 60
@@ -466,6 +473,16 @@ def pipeline(
     else:
         C.log(f"Using test command: {effective_test_cmd}")
 
+    # Pre-flight auth check
+    if not dry_run:
+        C.log("Checking API authentication...")
+        if not preflight_auth_check():
+            C.err("Pre-flight authentication check failed.")
+            C.err("Verify your API credentials before running the pipeline.")
+            C.err("A full pipeline run takes ~3 hours — auth must remain valid throughout.")
+            sys.exit(1)
+        C.ok("Authentication OK")
+
     # Detect GPU
     gpu_type = detect_gpu()
     if gpu_type != "none":
@@ -629,9 +646,17 @@ def pipeline(
         results.append(result)
 
         if result.outcome == RoundOutcome.HARD_FAILED:
-            C.err(f"Pipeline stopped at round {n} (hard gate failure).")
-            if n < total:
-                C.warn(f"Resume with: quality-pipeline --start-from {n + 1}")
+            # Check if the failure was an auth error (not a code problem)
+            claude_log = log_dir / f"round-{n}.log"
+            if claude_log.exists() and is_auth_error(claude_log):
+                C.err(f"Pipeline stopped at round {n} — authentication failure (not a code issue).")
+                C.err("Your API credentials expired during the run.")
+                if n <= total:
+                    C.warn(f"After fixing auth, resume this round with: quality-pipeline --start-from {n}")
+            else:
+                C.err(f"Pipeline stopped at round {n} (hard gate failure).")
+                if n < total:
+                    C.warn(f"Resume with: quality-pipeline --start-from {n + 1}")
             break
 
         if result.outcome == RoundOutcome.SOFT_FAILED:

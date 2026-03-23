@@ -572,3 +572,204 @@ class TestPrintMetaReviewFindings:
         qp._print_meta_review_findings(output)
         captured = capsys.readouterr().out
         assert "Could not parse" in captured
+
+
+class TestIsAuthError:
+    """Tests for is_auth_error — detect authentication failures in claude logs."""
+
+    def test_auth_error_detected(self, tmp_path):
+        log = tmp_path / "claude.log"
+        log.write_text(json.dumps({
+            "is_error": True,
+            "result": 'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"}}',
+        }))
+        assert qp.is_auth_error(log) is True
+
+    def test_non_auth_error_not_detected(self, tmp_path):
+        log = tmp_path / "claude.log"
+        log.write_text(json.dumps({
+            "is_error": True,
+            "result": "Some other error occurred",
+        }))
+        assert qp.is_auth_error(log) is False
+
+    def test_success_not_detected(self, tmp_path):
+        log = tmp_path / "claude.log"
+        log.write_text(json.dumps({
+            "is_error": False,
+            "result": "All good",
+        }))
+        assert qp.is_auth_error(log) is False
+
+    def test_empty_file(self, tmp_path):
+        log = tmp_path / "claude.log"
+        log.write_text("")
+        assert qp.is_auth_error(log) is False
+
+    def test_missing_file(self, tmp_path):
+        log = tmp_path / "nonexistent.log"
+        assert qp.is_auth_error(log) is False
+
+    def test_invalid_json(self, tmp_path):
+        log = tmp_path / "claude.log"
+        log.write_text("not json at all")
+        assert qp.is_auth_error(log) is False
+
+    def test_401_in_result(self, tmp_path):
+        log = tmp_path / "claude.log"
+        log.write_text(json.dumps({
+            "is_error": True,
+            "result": "API returned 401 unauthorized",
+        }))
+        assert qp.is_auth_error(log) is True
+
+    def test_401_without_is_error(self, tmp_path):
+        """401 in result but is_error=False should NOT be flagged."""
+        log = tmp_path / "claude.log"
+        log.write_text(json.dumps({
+            "is_error": False,
+            "result": "Recovered from 401 and continued",
+        }))
+        assert qp.is_auth_error(log) is False
+
+
+class TestRunClaudeAuthRetry:
+    """Tests for auth retry logic in run_claude."""
+
+    @staticmethod
+    def _mock_popen(returncode=0):
+        def factory(*args, **kwargs):
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO("")
+            proc.stderr = io.StringIO("")
+            proc.returncode = returncode
+            proc.wait.return_value = returncode
+            proc.kill.return_value = None
+            return proc
+        return factory
+
+    def test_auth_error_retried(self, tmp_path, monkeypatch):
+        """Auth error on first try, success on retry."""
+        log_file = tmp_path / "claude.log"
+        call_count = 0
+
+        def mock_popen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stderr = io.StringIO("")
+            proc.wait.return_value = 0 if call_count > 1 else 1
+            proc.returncode = 0 if call_count > 1 else 1
+            # Write auth error on first call, success on second
+            if call_count == 1:
+                proc.stdout = io.StringIO(json.dumps({
+                    "is_error": True,
+                    "result": "authentication_error 401",
+                }))
+            else:
+                proc.stdout = io.StringIO(json.dumps({
+                    "is_error": False,
+                    "result": "ok",
+                }))
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        monkeypatch.setattr("quality_pipeline.process.time.sleep", lambda _: None)
+        code = qp.run_claude("prompt", "ctx", 5.0, 20, log_file)
+        assert code == 0
+        assert call_count == 2
+
+    def test_non_auth_error_not_retried(self, tmp_path, monkeypatch):
+        """Non-auth errors should not trigger retry."""
+        log_file = tmp_path / "claude.log"
+        call_count = 0
+
+        def mock_popen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stderr = io.StringIO("")
+            proc.stdout = io.StringIO(json.dumps({
+                "is_error": True,
+                "result": "Some code error, not auth",
+            }))
+            proc.wait.return_value = 1
+            proc.returncode = 1
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        code = qp.run_claude("prompt", "ctx", 5.0, 20, log_file)
+        assert code == 1
+        assert call_count == 1  # no retry
+
+    def test_auth_error_exhausts_retries(self, tmp_path, monkeypatch):
+        """Auth error on all attempts returns non-zero."""
+        log_file = tmp_path / "claude.log"
+        call_count = 0
+
+        def mock_popen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stderr = io.StringIO("")
+            proc.stdout = io.StringIO(json.dumps({
+                "is_error": True,
+                "result": "authentication_error 401",
+            }))
+            proc.wait.return_value = 1
+            proc.returncode = 1
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        monkeypatch.setattr("quality_pipeline.process.time.sleep", lambda _: None)
+        code = qp.run_claude("prompt", "ctx", 5.0, 20, log_file)
+        assert code == 1
+        assert call_count == 3  # 1 initial + 2 retries
+
+
+class TestPreflightAuthCheck:
+    """Tests for preflight_auth_check."""
+
+    @staticmethod
+    def _mock_popen(returncode=0, stdout_content=""):
+        def factory(*args, **kwargs):
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO(stdout_content)
+            proc.stderr = io.StringIO("")
+            proc.returncode = returncode
+            proc.wait.return_value = returncode
+            return proc
+        return factory
+
+    def test_success(self, monkeypatch):
+        monkeypatch.setattr(
+            subprocess, "Popen",
+            self._mock_popen(0, json.dumps({"is_error": False, "result": "ok"})),
+        )
+        assert qp.preflight_auth_check() is True
+
+    def test_auth_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            subprocess, "Popen",
+            self._mock_popen(1, json.dumps({
+                "is_error": True,
+                "result": "authentication_error 401",
+            })),
+        )
+        assert qp.preflight_auth_check() is False
+
+    def test_non_auth_error_still_passes(self, monkeypatch):
+        """Non-auth errors mean auth itself is fine."""
+        monkeypatch.setattr(
+            subprocess, "Popen",
+            self._mock_popen(1, json.dumps({
+                "is_error": True,
+                "result": "Some tool error",
+            })),
+        )
+        assert qp.preflight_auth_check() is True

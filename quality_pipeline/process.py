@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from .output import C, format_duration
@@ -20,6 +21,11 @@ REVIEWER_BUDGET_USD = 1.00
 REVIEWER_MAX_TURNS = 5
 REVIEWER_TIMEOUT_MINUTES = 10
 REVIEWER_MAX_DIFF_CHARS = 8000
+
+AUTH_RETRY_MAX = 2
+AUTH_RETRY_DELAYS = [5, 15]  # seconds between retries (exponential-ish)
+PREFLIGHT_BUDGET_USD = 0.01
+PREFLIGHT_TIMEOUT_MINUTES = 2
 
 
 def _kill_process_group(proc: subprocess.Popen[str], graceful_wait: float = 2.0) -> None:
@@ -134,6 +140,58 @@ def _claude_env() -> dict[str, str]:
     return env
 
 
+def is_auth_error(log_file: Path) -> bool:
+    """Check whether a claude -p JSON log indicates an authentication failure."""
+    try:
+        raw = log_file.read_text()
+    except OSError:
+        return False
+    if not raw.strip():
+        return False  # empty output is ambiguous (could be timeout)
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    # Claude CLI sets is_error=true and includes "authentication_error" in result
+    result_str = str(data.get("result", ""))
+    return bool(
+        data.get("is_error")
+        and ("authentication_error" in result_str or "401" in result_str)
+    )
+
+
+def preflight_auth_check() -> bool:
+    """Run a trivial claude invocation to verify API authentication works.
+
+    Returns True if auth is valid, False otherwise.
+    """
+    import tempfile as _tempfile
+    fd, tmp = _tempfile.mkstemp(prefix="quality-preflight-", suffix=".json")
+    os.close(fd)
+    tmp_path = Path(tmp)
+    try:
+        cmd = [
+            "claude", "-p", "Reply with exactly: ok",
+            "--dangerously-skip-permissions",
+            "--max-budget-usd", f"{PREFLIGHT_BUDGET_USD:.2f}",
+            "--max-turns", "1",
+            "--output-format", "json",
+        ]
+        exit_code, timed_out = _run_claude_process(cmd, tmp_path, PREFLIGHT_TIMEOUT_MINUTES)
+        if timed_out:
+            return False
+        if exit_code != 0:
+            return not is_auth_error(tmp_path)  # non-auth errors are fine
+        return True
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _run_claude_process(
     cmd: list[str],
     output_file: Path,
@@ -215,7 +273,11 @@ def run_claude(
     log_file: Path,
     timeout_minutes: int = 0,
 ) -> int:
-    """Invoke claude -p and capture output to log. Returns exit code."""
+    """Invoke claude -p and capture output to log. Returns exit code.
+
+    On authentication failures, retries up to AUTH_RETRY_MAX times with
+    increasing delays (the CLI may refresh its token on next launch).
+    """
     cmd = [
         "claude", "-p", prompt,
         "--append-system-prompt", system_ctx,
@@ -231,6 +293,25 @@ def run_claude(
             f"increase max_time_minutes if the round needs more time"
         )
         return -1
+
+    # Retry on auth failures — the CLI may refresh its token on relaunch
+    if exit_code != 0 and is_auth_error(log_file):
+        for attempt in range(AUTH_RETRY_MAX):
+            delay = AUTH_RETRY_DELAYS[min(attempt, len(AUTH_RETRY_DELAYS) - 1)]
+            C.warn(
+                f"Authentication error — retrying in {delay}s "
+                f"(attempt {attempt + 2}/{AUTH_RETRY_MAX + 1})"
+            )
+            time.sleep(delay)
+            exit_code, timed_out = _run_claude_process(cmd, log_file, timeout_minutes)
+            if timed_out:
+                C.err(f"Claude timed out after {timeout_minutes} minutes")
+                return -1
+            if exit_code == 0 or not is_auth_error(log_file):
+                break
+        else:
+            C.err("Authentication failed after all retries")
+
     return exit_code
 
 
@@ -307,6 +388,28 @@ def run_reviewer(
     if timed_out:
         C.warn(f"Reviewer timed out after {REVIEWER_TIMEOUT_MINUTES}m — skipping review")
         return None
+
+    # Retry reviewer on auth failures
+    if exit_code != 0 and is_auth_error(review_output):
+        for attempt in range(AUTH_RETRY_MAX):
+            delay = AUTH_RETRY_DELAYS[min(attempt, len(AUTH_RETRY_DELAYS) - 1)]
+            C.warn(
+                f"Reviewer auth error — retrying in {delay}s "
+                f"(attempt {attempt + 2}/{AUTH_RETRY_MAX + 1})"
+            )
+            time.sleep(delay)
+            exit_code, timed_out = _run_claude_process(
+                cmd, review_output, REVIEWER_TIMEOUT_MINUTES,
+            )
+            if timed_out:
+                C.warn(f"Reviewer timed out — skipping review")
+                return None
+            if exit_code == 0 or not is_auth_error(review_output):
+                break
+        else:
+            C.err("Reviewer authentication failed after all retries")
+            return None
+
     C.log(f"Reviewer claude finished (exit {exit_code})")
 
     verdict = _parse_verdict(review_output.read_text())

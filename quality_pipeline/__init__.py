@@ -79,6 +79,8 @@ from .process import (
     _kill_process_group as _kill_process_group,
     run_tests_with_tee as run_tests_with_tee,
     _claude_env as _claude_env,
+    is_auth_error as is_auth_error,
+    preflight_auth_check as preflight_auth_check,
     _run_claude_process as _run_claude_process,
     run_claude as run_claude,
     _parse_verdict as _parse_verdict,
