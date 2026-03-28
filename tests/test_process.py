@@ -410,8 +410,8 @@ class TestRunReviewer:
         assert result == "critical"
 
     def test_diff_truncation(self, tmp_path, monkeypatch):
-        """Large diffs should be truncated to 8000 chars."""
-        big_diff = "x" * 10000
+        """Large diffs should be truncated to REVIEWER_MAX_DIFF_CHARS."""
+        big_diff = "x" * 25000
         monkeypatch.setattr(
             qp.process, "git", _mock_git_fn(stdout=big_diff),
         )
@@ -773,3 +773,56 @@ class TestPreflightAuthCheck:
             })),
         )
         assert qp.preflight_auth_check() is True
+
+
+class TestUnwrapClaudeJson:
+    """Tests for unwrap_claude_json helper."""
+
+    def test_unwraps_result_key(self):
+        raw = json.dumps({"result": "inner content"})
+        assert qp.unwrap_claude_json(raw) == "inner content"
+
+    def test_returns_raw_when_no_result(self):
+        raw = json.dumps({"foo": "bar"})
+        assert qp.unwrap_claude_json(raw) == raw
+
+    def test_returns_raw_for_non_json(self):
+        raw = "plain text"
+        assert qp.unwrap_claude_json(raw) == "plain text"
+
+    def test_returns_raw_for_empty(self):
+        assert qp.unwrap_claude_json("") == ""
+
+    def test_non_dict_json(self):
+        raw = json.dumps([1, 2, 3])
+        assert qp.unwrap_claude_json(raw) == raw
+
+
+class TestReviewerExitCodeCheck:
+    """Reviewer should return None when Claude exits non-zero."""
+
+    def test_nonzero_exit_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            qp.process, "git", _mock_git_fn(stdout="diff content\n"),
+        )
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "reviewer.md").write_text("Review: DIFF_PLACEHOLDER")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        def mock_popen(*args, **_kwargs):
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO("")
+            proc.stderr = io.StringIO("")
+            proc.returncode = 1
+            proc.wait.return_value = 1
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        # Ensure is_auth_error returns False so we don't hit auth retry
+        monkeypatch.setattr(qp.process, "is_auth_error", lambda _: False)
+        result = qp.run_reviewer(
+            1, qp.RoundConfig(name="test", review=True), "abc", log_dir, None,
+        )
+        assert result is None

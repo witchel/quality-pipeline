@@ -7,6 +7,7 @@ max_time_minutes: 20
 gate: hard
 max_retries: 0
 review: true
+review_gate: hard
 analyzers: bandit semgrep
 ---
 

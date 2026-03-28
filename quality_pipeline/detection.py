@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 from .config import DEFAULT_ANALYZERS, MAX_ANALYSIS_OUTPUT
+from .output import C
 
 _ANALYZER_TIMEOUT_SECS = 120
 
@@ -123,12 +124,18 @@ def _run_analyzer(name: str, args: list[str], project_dir: Path,
     elif shutil.which("timeout"):
         timeout_cmd = ["timeout", str(_ANALYZER_TIMEOUT_SECS)]
 
+    # Use subprocess timeout as fallback when no system timeout command exists
+    sub_timeout = None if timeout_cmd else _ANALYZER_TIMEOUT_SECS
     try:
         result = subprocess.run(
             [*timeout_cmd, *args],
             capture_output=True, text=True, check=False, cwd=project_dir,
+            timeout=sub_timeout,
         )
         return result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        C.warn(f"Analyzer '{name}' timed out after {_ANALYZER_TIMEOUT_SECS}s")
+        return ""
     except (subprocess.SubprocessError, OSError):
         return ""
 

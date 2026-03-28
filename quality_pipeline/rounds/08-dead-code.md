@@ -7,6 +7,7 @@ max_time_minutes: 10
 gate: soft
 max_retries: 1
 review: true
+review_gate: soft
 ---
 
 # Remove Dead Code

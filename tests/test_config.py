@@ -5,6 +5,7 @@ from __future__ import annotations
 import yaml
 
 import quality_pipeline as qp
+from quality_pipeline.config import _parse_review_bool
 
 
 class TestParseFrontmatter:
@@ -403,28 +404,28 @@ class TestLoadPipelineConfig:
 
 class TestParseReviewBool:
     def test_bool_true(self):
-        assert qp._parse_review_bool(True) is True
+        assert _parse_review_bool(True) is True
 
     def test_bool_false(self):
-        assert qp._parse_review_bool(False) is False
+        assert _parse_review_bool(False) is False
 
     def test_str_true_lower(self):
-        assert qp._parse_review_bool("true") is True
+        assert _parse_review_bool("true") is True
 
     def test_str_true_mixed(self):
-        assert qp._parse_review_bool("True") is True
+        assert _parse_review_bool("True") is True
 
     def test_str_false(self):
-        assert qp._parse_review_bool("false") is False
+        assert _parse_review_bool("false") is False
 
     def test_str_other(self):
-        assert qp._parse_review_bool("yes") is False
+        assert _parse_review_bool("yes") is False
 
     def test_none_returns_none(self):
-        assert qp._parse_review_bool(None) is None
+        assert _parse_review_bool(None) is None
 
     def test_int_returns_none(self):
-        assert qp._parse_review_bool(1) is None
+        assert _parse_review_bool(1) is None
 
 
 class TestRoundOutcome:
@@ -524,3 +525,62 @@ class TestResolveRoundFile:
         f.write_text("---\nname: other\n---\n")
         result = qp.resolve_round_file("test[1]")
         assert result == f
+
+
+class TestFinalizePositiveValidation:
+    """_finalize_round_config rejects non-positive numeric values."""
+
+    def test_negative_budget_uses_default(self, capsys):
+        rc = qp.RoundConfig(name="test", max_budget_usd=-1.0)
+        result = qp._finalize_round_config(rc)
+        assert result.max_budget_usd == qp._DEFAULT_MAX_BUDGET_USD
+        assert "not positive" in capsys.readouterr().out
+
+    def test_zero_turns_uses_default(self, capsys):
+        rc = qp.RoundConfig(name="test", max_turns=0)
+        result = qp._finalize_round_config(rc)
+        assert result.max_turns == qp._DEFAULT_MAX_TURNS
+        assert "not positive" in capsys.readouterr().out
+
+    def test_negative_time_uses_default(self, capsys):
+        rc = qp.RoundConfig(name="test", max_time_minutes=-5)
+        result = qp._finalize_round_config(rc)
+        assert result.max_time_minutes == qp._DEFAULT_MAX_TIME_MINUTES
+        assert "not positive" in capsys.readouterr().out
+
+    def test_positive_values_kept(self):
+        rc = qp.RoundConfig(
+            name="test", max_budget_usd=2.0, max_turns=10, max_time_minutes=5,
+        )
+        result = qp._finalize_round_config(rc)
+        assert result.max_budget_usd == 2.0
+        assert result.max_turns == 10
+        assert result.max_time_minutes == 5
+
+
+class TestPipelineConfigMaxTurns:
+    """PipelineConfig.max_turns cascades through apply_config_overrides."""
+
+    def test_max_turns_from_pipeline_config(self):
+        rc = qp.RoundConfig(name="test")
+        config = qp.PipelineConfig(max_turns=50)
+        result = qp.apply_config_overrides(rc, config)
+        assert result.max_turns == 50
+
+    def test_per_round_override_wins(self):
+        rc = qp.RoundConfig(name="test")
+        config = qp.PipelineConfig(max_turns=50, overrides={"test": {"max_turns": 99}})
+        result = qp.apply_config_overrides(rc, config)
+        assert result.max_turns == 99
+
+    def test_frontmatter_wins_over_pipeline(self):
+        rc = qp.RoundConfig(name="test", max_turns=15)
+        config = qp.PipelineConfig(max_turns=50)
+        result = qp.apply_config_overrides(rc, config)
+        assert result.max_turns == 15
+
+    def test_load_pipeline_config_parses_max_turns(self, tmp_path):
+        f = tmp_path / "pipeline.yaml"
+        f.write_text("max_turns: 42\n")
+        cfg = qp.load_pipeline_config(f)
+        assert cfg.max_turns == 42

@@ -41,7 +41,7 @@ VALID_GATES = {"hard", "soft", "none"}
 
 _DEFAULT_MAX_BUDGET_USD = 5.00
 _DEFAULT_MAX_TURNS = 30
-_DEFAULT_MAX_TIME_MINUTES = 15
+_DEFAULT_MAX_TIME_MINUTES = 20
 
 # ---------------------------------------------------------------------------
 # Dataclasses & enums
@@ -68,6 +68,7 @@ class PipelineConfig:
     rounds: list[str] = field(default_factory=list)
     branch_prefix: str = ""
     max_budget_usd: float | None = None
+    max_turns: int | None = None
     max_time_minutes: int | None = None
     overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -171,12 +172,14 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
             overrides[name] = ov
 
     raw_time = data.get("max_time_minutes")
+    raw_turns = data.get("max_turns")
     try:
         return PipelineConfig(
             test_command=str(data.get("test_command", "")),
             rounds=list(data.get("rounds", [])),
             branch_prefix=str(data.get("branch_prefix", "")),
             max_budget_usd=float(data["max_budget_usd"]) if "max_budget_usd" in data else None,
+            max_turns=int(raw_turns) if raw_turns is not None else None,
             max_time_minutes=int(raw_time) if raw_time is not None else None,
             overrides=overrides,
         )
@@ -198,7 +201,7 @@ def _find_override(name: str, config: PipelineConfig) -> dict[str, Any]:
 
 
 def _finalize_round_config(rc: RoundConfig) -> RoundConfig:
-    """Fill in defaults for unset fields and validate gate value."""
+    """Fill in defaults for unset fields and validate gate/numeric values."""
     changes: dict[str, float | int | bool | str] = {}
     if rc.max_budget_usd is None:
         changes["max_budget_usd"] = _DEFAULT_MAX_BUDGET_USD
@@ -217,7 +220,21 @@ def _finalize_round_config(rc: RoundConfig) -> RoundConfig:
             f"— defaulting to 'none'"
         )
         changes["review_gate"] = "none"
-    return replace(rc, **changes) if changes else rc
+    rc = replace(rc, **changes) if changes else rc
+    # Validate positive numeric values
+    budget = rc.max_budget_usd
+    turns = rc.max_turns
+    time_m = rc.max_time_minutes
+    if budget is not None and budget <= 0:
+        C.warn(f"max_budget_usd={budget} for '{rc.name}' is not positive — using default")
+        rc = replace(rc, max_budget_usd=_DEFAULT_MAX_BUDGET_USD)
+    if turns is not None and turns <= 0:
+        C.warn(f"max_turns={turns} for '{rc.name}' is not positive — using default")
+        rc = replace(rc, max_turns=_DEFAULT_MAX_TURNS)
+    if time_m is not None and time_m <= 0:
+        C.warn(f"max_time_minutes={time_m} for '{rc.name}' is not positive — using default")
+        rc = replace(rc, max_time_minutes=_DEFAULT_MAX_TIME_MINUTES)
+    return rc
 
 
 def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConfig:
@@ -241,6 +258,8 @@ def apply_config_overrides(rc: RoundConfig, config: PipelineConfig) -> RoundConf
 
     if "max_turns" in ov:
         rc.max_turns = int(ov["max_turns"])
+    elif rc.max_turns is None and config.max_turns is not None:
+        rc.max_turns = config.max_turns
 
     if "gate" in ov:
         rc.gate = str(ov["gate"])

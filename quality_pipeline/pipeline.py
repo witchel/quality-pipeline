@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,6 +49,7 @@ from .process import (
     run_meta_review,
     run_reviewer,
     run_tests_with_tee,
+    unwrap_claude_json,
 )
 from .cleanup import _cleanup
 
@@ -65,13 +66,7 @@ def _extract_change_summary(log_file: Path) -> str:
         raw = log_file.read_text()
     except OSError:
         return ""
-    # Unwrap claude JSON output wrapper: {"result": "..."}
-    try:
-        outer = json.loads(raw)
-        if isinstance(outer, dict) and "result" in outer:
-            raw = outer["result"]
-    except (json.JSONDecodeError, ValueError):
-        pass
+    raw = unwrap_claude_json(raw)
     for line in raw.splitlines():
         stripped = line.strip()
         if stripped.startswith(_CHANGES_SUMMARY_PREFIX):
@@ -345,9 +340,13 @@ def _execute_round(
         retry_log = log_dir / f"round-{round_num}-retry-{attempt}.log"
         retry_exit = run_claude(
             retry_prompt, system_context, retry_budget, rc.max_turns, retry_log,
-            timeout_minutes=max(1, remaining // 60),
+            timeout_minutes=max(1, (remaining + 59) // 60),
         )
         C.log(f"Retry claude finished (exit {retry_exit})")
+
+        if retry_exit != 0:
+            C.err(f"Retry Claude failed (exit {retry_exit}) — skipping re-stage")
+            continue
 
         # Re-stage changes
         git_stage_round_changes(pre_untracked)
@@ -415,6 +414,11 @@ def pipeline(
             sys.exit(1)
         os.chdir(pdir)
         C.log(f"Working in: {project_dir}")
+
+    # Ensure claude CLI is available
+    if not dry_run and not shutil.which("claude"):
+        C.err("'claude' CLI not found on PATH. Install it first.")
+        sys.exit(1)
 
     # Ensure we're in a git repo
     result = subprocess.run(

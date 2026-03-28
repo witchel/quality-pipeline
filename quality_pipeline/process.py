@@ -20,7 +20,7 @@ from .git_ops import git
 REVIEWER_BUDGET_USD = 1.00
 REVIEWER_MAX_TURNS = 5
 REVIEWER_TIMEOUT_MINUTES = 10
-REVIEWER_MAX_DIFF_CHARS = 8000
+REVIEWER_MAX_DIFF_CHARS = 20_000
 
 AUTH_RETRY_MAX = 2
 AUTH_RETRY_DELAYS = [5, 15]  # seconds between retries (exponential-ish)
@@ -44,7 +44,10 @@ def _kill_process_group(proc: subprocess.Popen[str], graceful_wait: float = 2.0)
         return
     try:
         os.killpg(proc.pid, signal.SIGTERM)
-    except OSError:
+    except OSError as e:
+        import errno
+        if e.errno != errno.ESRCH:
+            C.warn(f"killpg SIGTERM failed (pid {proc.pid}): {e}")
         return
     try:
         proc.wait(timeout=graceful_wait)
@@ -261,6 +264,8 @@ def _run_claude_process(
             timer.cancel()
         if stderr_thread is not None:
             stderr_thread.join(timeout=5)
+            if stderr_thread.is_alive():
+                C.warn("stderr reader thread did not exit within 5s")
 
     return proc.returncode, timed_out.is_set()
 
@@ -315,15 +320,20 @@ def run_claude(
     return exit_code
 
 
-def _parse_verdict(raw: str) -> str:
-    """Extract verdict string from reviewer output (possibly JSON-wrapped)."""
-    # Unwrap claude JSON output wrapper: {"result": "..."}
+def unwrap_claude_json(raw: str) -> str:
+    """Unwrap claude JSON output wrapper: ``{"result": "..."}`` → inner string."""
     try:
         outer = json.loads(raw)
         if isinstance(outer, dict) and "result" in outer:
-            raw = outer["result"]
+            return str(outer["result"])
     except (json.JSONDecodeError, ValueError):
         pass
+    return raw
+
+
+def _parse_verdict(raw: str) -> str:
+    """Extract verdict string from reviewer output (possibly JSON-wrapped)."""
+    raw = unwrap_claude_json(raw)
 
     text = raw.strip()
     if text.startswith("```"):
@@ -411,6 +421,10 @@ def run_reviewer(
             return None
 
     C.log(f"Reviewer claude finished (exit {exit_code})")
+
+    if exit_code != 0:
+        C.warn(f"Reviewer exited with code {exit_code} — skipping verdict parse")
+        return None
 
     verdict = _parse_verdict(review_output.read_text())
 
