@@ -26,10 +26,12 @@ Work through the following areas in order. After each fix, run the test suite to
 
 ### A. Atomic writes
 
-Look for direct writes to state, config, or metadata files that leave a window where the file is truncated or partial.
+Look for direct writes to **important state or metadata files** that leave a window where the file is truncated or partial. Focus on files where corruption means data loss or broken state that requires manual recovery.
+
+**Triage before fixing:** Not all files warrant atomic writes. Ask: "If a crash corrupts this file, how bad is it?" Apply atomic writes to files where corruption loses significant user work (progress metadata, generated summaries, conversion state). Skip files that are trivially recoverable or regenerated on next run (`.gitignore` entries, cache files, lock files, log files). A crash mid-append to `.gitignore` is annoying but costs 5 seconds to fix manually; a crash mid-write to `conversion.json` could lose hours of API-generated descriptions.
 
 **Flag:**
-- Direct overwrites (`open("config.json", "w")` followed by `write()`) without the write-temp-fsync-rename pattern
+- Direct overwrites (`open("config.json", "w")` followed by `write()`) without the write-temp-fsync-rename pattern — **but only for high-value state files where corruption means real data loss**
 - Temp files created in `/tmp` when the target file is on a different filesystem (breaks `rename()` atomicity — rename across filesystems is not atomic)
 - Predictable temp file names (hardcoded names like `config.json.tmp`) instead of `mkstemp()` / `NamedTemporaryFile`
 - Missing cleanup of temp files in error paths (need `finally` block or context manager)
@@ -106,7 +108,7 @@ After each fix, run the full test suite to confirm existing behavior is preserve
 ## Behavior Contract
 
 ### MUST change
-- Non-atomic file overwrites (direct writes without write-temp-fsync-rename)
+- Non-atomic file overwrites on high-value state files (progress metadata, generated data, conversion state) — files where corruption means significant data loss
 - Read-modify-write cycles on state files without locking
 - Missing fsync between write and rename in atomic write patterns
 - Non-idempotent operations that corrupt state when retried
@@ -120,6 +122,7 @@ After each fix, run the full test suite to confirm existing behavior is preserve
 ## What NOT to do
 
 - **Do not** add fault tolerance to throwaway or ephemeral data (caches, temp files that are regenerated on startup)
+- **Do not** add atomic writes to low-stakes config files where corruption is trivially recoverable. `.gitignore` entries, log files, and user-facing config that can be regenerated in seconds do not warrant write-temp-fsync-rename. Reserve the full atomic pattern for files where corruption loses significant user work (hours of API-generated content, conversion metadata, progress state)
 - **Do not** introduce database-level transaction machinery for simple file operations
 - **Do not** convert file-based state to a database — fix the file operations, don't change the architecture
 - **Do not** add retry loops — this round fixes atomicity and durability, not transient failure recovery

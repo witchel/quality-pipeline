@@ -54,8 +54,9 @@ Before making any changes, scan the codebase for concurrency primitives (threads
    - Sequential steps that have no data dependency between them
    - Use idiomatic patterns: `asyncio.gather()` / `asyncio.TaskGroup` in Python, `Promise.all()` in JS, `sync.WaitGroup` / `errgroup` in Go, `CompletableFuture.allOf()` in Java
    - Only parallelize when the operations are genuinely independent and the overhead is justified (don't parallelize two 1ms operations)
+   - **After parallelizing, trace the full data flow**: verify that return types from worker functions match what the caller destructures, that result aggregation logic is correct, and that any counters or accumulators are updated correctly. Parallelization changes function boundaries — a sequential loop's inline variables become a worker function's return values, and mismatches (e.g., returning a 3-tuple but destructuring as 2-tuple) cause runtime crashes that tests may not cover
 
-6. **Verify**: Run the test suite after each fix to confirm behavior is preserved.
+6. **Verify**: Run the test suite after each fix to confirm behavior is preserved. For newly-parallelized code, also manually trace the worker function's return type through to the caller's destructuring — this is the most common source of bugs in sequential-to-parallel conversions.
 
 ## Behavior Contract
 
@@ -79,3 +80,5 @@ Before making any changes, scan the codebase for concurrency primitives (threads
 - Don't fix concurrency performance issues (lock contention, false sharing) — focus on correctness and obvious parallelization wins
 - Don't modify tests
 - Don't parallelize operations that have side effects on shared state unless you also add proper synchronization
+- Don't parallelize a sequential loop without verifying the entire result-handling path still works. Common bugs: worker returns a different tuple shape than the caller expects, counters that relied on sequential ordering now race, and progress reporting that assumed items complete in order
+- Don't parallelize code paths that lack test coverage for the parallel case. If existing tests only exercise the sequential path, the parallelization is untested. Add a test that exercises the parallel execution (even a simple one with 2-3 items) before considering the change complete
