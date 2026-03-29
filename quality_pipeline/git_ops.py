@@ -65,6 +65,24 @@ def git_diff_stats(pre_sha: str, post_sha: str) -> DiffStats:
     )
 
 
+def git_diff_full() -> str:
+    """Return the full unified diff of all unstaged and staged changes."""
+    unstaged = git("diff", check=False)
+    staged = git("diff", "--cached", check=False)
+    parts = []
+    if unstaged.stdout:
+        parts.append(unstaged.stdout)
+    if staged.stdout:
+        parts.append(staged.stdout)
+    return "\n".join(parts)
+
+
+def git_rollback_changes() -> None:
+    """Reset the working tree: discard all modifications and remove untracked files."""
+    git("checkout", "--", ".", check=False)
+    git("clean", "-fd", check=False)
+
+
 def git_has_uncommitted() -> bool:
     """Check if tracked files have uncommitted changes."""
     r1 = git("diff", "--quiet", check=False)

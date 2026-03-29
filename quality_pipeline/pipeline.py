@@ -34,9 +34,11 @@ from .git_ops import (
     git_acquire_lock,
     git_commit,
     git_create_branch,
+    git_diff_full,
     git_diff_stats,
     git_has_uncommitted,
     git_rev_parse_head,
+    git_rollback_changes,
     git_rollback_round,
     git_stage_round_changes,
     git_untracked_files,
@@ -72,6 +74,101 @@ def _extract_change_summary(log_file: Path) -> str:
         if stripped.startswith(_CHANGES_SUMMARY_PREFIX):
             return stripped[len(_CHANGES_SUMMARY_PREFIX):].strip()
     return ""
+
+
+def _filter_bookend_changes(
+    baseline_diff: str, current_diff: str
+) -> tuple[set[str], set[str]]:
+    """Return (safe_files, skipped_files) by intersecting deleted content.
+
+    safe_files: files where ALL deleted lines were also deleted in the baseline
+    skipped_files: files with new deletions not in the baseline
+    """
+    def _deleted_lines_by_file(diff_text: str) -> dict[str, set[str]]:
+        result: dict[str, set[str]] = {}
+        current_file = None
+        for line in diff_text.splitlines():
+            if line.startswith("--- a/"):
+                current_file = line[6:]
+            elif line.startswith("-") and not line.startswith("---"):
+                if current_file:
+                    result.setdefault(current_file, set()).add(line[1:].strip())
+        return result
+
+    baseline = _deleted_lines_by_file(baseline_diff)
+    current = _deleted_lines_by_file(current_diff)
+
+    safe: set[str] = set()
+    skipped: set[str] = set()
+    for filepath, deleted in current.items():
+        baseline_deleted = baseline.get(filepath, set())
+        if deleted and deleted <= baseline_deleted:
+            safe.add(filepath)
+        else:
+            skipped.add(filepath)
+    return safe, skipped
+
+
+def _run_bookend_baseline(
+    round_file: Path,
+    round_num: int,
+    total_rounds: int,
+    test_cmd: str,
+    config: PipelineConfig,
+    log_dir: Path,
+    rc: RoundConfig,
+) -> str:
+    """Run a bookend dry-run: invoke Claude, capture diff, rollback.
+
+    Returns the unified diff text (empty string if no changes).
+    """
+    assert rc.max_budget_usd is not None
+    assert rc.max_turns is not None
+    assert rc.max_time_minutes is not None
+
+    prompt = get_round_prompt(round_file)
+    prompt = apply_config_prompt_append(rc.name, prompt, config)
+
+    system_context = (
+        f"You are running as part of an automated quality pipeline.\n"
+        f"This is round {round_num} of {total_rounds}: {rc.name}.\n"
+        f"The test command for this project is: {test_cmd}\n"
+        f"After making changes, run the tests to verify nothing is broken.\n"
+        f"Do not commit your changes — the pipeline handles commits.\n"
+        f"Focus exclusively on the task described in the prompt. "
+        f"Do not do work that belongs to other rounds.\n"
+        f"If the prompt includes a Behavior Contract section, you MUST follow it "
+        f"strictly. Items under MUST change are required fixes. Items under MUST NOT "
+        f"change are hard constraints.\n"
+        f"After completing all your work, output a final line starting with "
+        f"CHANGES_SUMMARY: followed by a brief (under 80 chars) description of "
+        f"the most important changes you made. Example: "
+        f"CHANGES_SUMMARY: Fixed TOCTTOU race in lock acquisition; added atomic PID write"
+    )
+
+    # Run static analysis (same as normal execution)
+    analysis_output = run_static_analysis(rc.name, Path.cwd(), rc.analyzers)
+    if analysis_output:
+        prompt += (
+            "\n\n## Static Analysis Results\n"
+            "The following issues were found by static analysis tools. "
+            "Use these as a starting point:\n" + analysis_output
+        )
+
+    claude_log = log_dir / f"bookend-baseline-{rc.name}.log"
+    claude_exit = run_claude(
+        prompt, system_context, rc.max_budget_usd, rc.max_turns, claude_log,
+        timeout_minutes=rc.max_time_minutes,
+    )
+
+    if claude_exit != 0:
+        C.warn(f"  Bookend baseline Claude exited {claude_exit} — skipping baseline")
+        git_rollback_changes()
+        return ""
+
+    diff = git_diff_full()
+    git_rollback_changes()
+    return diff
 
 
 def _print_round_result(round_num: int, total: int, result: RoundResult) -> None:
@@ -154,6 +251,7 @@ def run_round(
     log_dir: Path,
     gpu_type: str,
     rc: RoundConfig | None = None,
+    bookend_baseline: str | None = None,
 ) -> RoundResult:
     """Execute a single pipeline round. Returns a RoundResult."""
     round_start = time.time()
@@ -166,6 +264,7 @@ def run_round(
         result = _execute_round(
             round_file, round_num, total_rounds, test_cmd, config,
             review_flag, log_dir, gpu_type, rc, round_start, pre_sha,
+            bookend_baseline=bookend_baseline,
         )
         _print_round_result(round_num, total_rounds, result)
         return result
@@ -188,6 +287,7 @@ def _execute_round(
     rc: RoundConfig,
     round_start: float,
     pre_sha: str,
+    bookend_baseline: str | None = None,
 ) -> RoundResult:
     """Inner round execution: prompt, Claude, tests, commit."""
     # _finalize_round_config guarantees these are set
@@ -273,6 +373,40 @@ def _execute_round(
     if not has_changes:
         C.warn(f"No changes made in round {round_num} ({rc.name}) — skipping commit")
         return RoundResult(rc.name, RoundOutcome.NO_CHANGES, elapsed_seconds=_elapsed())
+
+    # Bookend filtering: keep only changes that were also in the baseline
+    if bookend_baseline is not None:
+        current_diff = git_diff_full()
+        safe_files, skipped_files = _filter_bookend_changes(
+            bookend_baseline, current_diff
+        )
+        if skipped_files:
+            C.warn(
+                f"  Bookend filter: {len(skipped_files)} file(s) skipped "
+                f"(depend on prior rounds): {', '.join(sorted(skipped_files))}"
+            )
+            # Revert skipped files, keeping safe files modified
+            for f in skipped_files:
+                git("checkout", "--", f, check=False)
+            # Re-check if anything remains
+            has_changes = (
+                git("diff", "--quiet", check=False).returncode != 0
+                or git("diff", "--cached", "--quiet", check=False).returncode != 0
+                or bool(git_untracked_files() - pre_untracked)
+            )
+            if not has_changes:
+                C.warn(
+                    f"No safe changes remain after bookend filter in round "
+                    f"{round_num} ({rc.name}) — skipping commit"
+                )
+                return RoundResult(
+                    rc.name, RoundOutcome.NO_CHANGES, elapsed_seconds=_elapsed()
+                )
+        if safe_files:
+            C.log(
+                f"  Bookend filter: {len(safe_files)} file(s) passed: "
+                f"{', '.join(sorted(safe_files))}"
+            )
 
     # Stage changes
     git_stage_round_changes(pre_untracked)
@@ -631,6 +765,24 @@ def pipeline(
         C.ok("Dry run complete. No changes made.")
         return
 
+    # --- Bookend baselines ---
+    bookend_baselines: dict[str, str] = {}
+    for i, (rf, rc) in enumerate(round_configs):
+        if not rc.bookend:
+            continue
+        n = i + 1
+        if n < start_from:
+            continue
+        C.log(f"Running bookend baseline for '{rc.name}'...")
+        baseline_diff = _run_bookend_baseline(
+            rf, n, total, effective_test_cmd, config, log_dir, rc,
+        )
+        if baseline_diff:
+            bookend_baselines[rc.name] = baseline_diff
+            C.log(f"  Captured {len(baseline_diff)} bytes of baseline diff")
+        else:
+            C.log(f"  No dead code found in baseline")
+
     # --- Run rounds ---
     pipeline_start = time.time()
     results: list[RoundResult] = []
@@ -645,6 +797,7 @@ def pipeline(
         result = run_round(
             rf, n, total, effective_test_cmd, config, review_flag, log_dir, gpu_type,
             rc=rc,
+            bookend_baseline=bookend_baselines.get(rc.name),
         )
 
         results.append(result)

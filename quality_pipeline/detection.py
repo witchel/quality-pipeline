@@ -111,7 +111,7 @@ def detect_test_command(project_dir: Path) -> str | None:
 def _run_analyzer(name: str, args: list[str], project_dir: Path,
                   prerequisites: list[str] | None = None) -> str:
     """Run a single analyzer tool if available. Returns output or empty string."""
-    if not shutil.which(name):
+    if not shutil.which(args[0]):
         return ""
     # Check tool-specific prerequisites
     if prerequisites:
@@ -174,6 +174,31 @@ def run_static_analysis(
         "vulture": (
             ["vulture", "."],
             python_prereqs,
+        ),
+        "ruff-dead-code": (
+            ["ruff", "check", "--isolated", "--select", "F401,F841,F811,ERA",
+             "--output-format", "concise", "."],
+            python_prereqs,
+        ),
+        "ruff-simplify": (
+            ["ruff", "check", "--isolated", "--select", "SIM,C4,B",
+             "--output-format", "concise", "."],
+            python_prereqs,
+        ),
+        "ruff-security": (
+            ["ruff", "check", "--isolated", "--select", "S",
+             "--output-format", "concise", "."],
+            python_prereqs,
+        ),
+        "ruff-refactor": (
+            ["ruff", "check", "--isolated", "--select", "UP,PIE,RET,SIM",
+             "--output-format", "concise", "."],
+            python_prereqs,
+        ),
+        "codegraph-unused": (
+            ["codegraph", "context", "-p", ".",
+             "List functions and classes that are defined but never called or imported"],
+            [".codegraph"],
         ),
     }
 

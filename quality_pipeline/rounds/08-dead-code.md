@@ -8,6 +8,7 @@ gate: soft
 max_retries: 1
 review: true
 review_gate: soft
+bookend: true
 ---
 
 # Remove Dead Code

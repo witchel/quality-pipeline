@@ -30,9 +30,11 @@ ENV_FILES = [".env", ".env.local", ".env.test"]
 BRANCH_PREFIX_DEFAULT = "quality"
 
 DEFAULT_ANALYZERS: dict[str, str] = {
-    "security": "bandit semgrep",
+    "security": "bandit semgrep ruff-security",
     "type-safety": "mypy pyright tsc",
-    "dead-code": "vulture",
+    "dead-code": "vulture ruff-dead-code codegraph-unused",
+    "simplify": "ruff-simplify",
+    "refactor": "ruff-refactor",
 }
 
 MAX_ANALYSIS_OUTPUT = 4000
@@ -60,6 +62,7 @@ class RoundConfig:
     review: bool | None = None  # None = not set (defaults to False)
     review_gate: str = "none"  # none=advisory, soft/hard=verdict can fail round
     analyzers: str = ""
+    bookend: bool = False
 
 
 @dataclass
@@ -130,6 +133,7 @@ def parse_frontmatter(path: Path) -> RoundConfig:
         return RoundConfig()
 
     review = _parse_review_bool(data.get("review"))
+    bookend = _parse_review_bool(data.get("bookend"))
 
     try:
         return RoundConfig(
@@ -143,6 +147,7 @@ def parse_frontmatter(path: Path) -> RoundConfig:
             review=review,
             review_gate=str(data.get("review_gate", "none")),
             analyzers=str(data.get("analyzers", "")),
+            bookend=bool(bookend) if bookend is not None else False,
         )
     except (ValueError, TypeError) as e:
         C.warn(f"Invalid value in frontmatter of {path.name}: {e}")

@@ -101,6 +101,31 @@ class TestParseFrontmatter:
         captured = capsys.readouterr()
         assert "Invalid value" in captured.out
 
+    def test_bookend_true(self, tmp_path):
+        f = tmp_path / "round.md"
+        f.write_text("---\nname: dead-code\nbookend: true\n---\nPrompt.\n")
+        rc = qp.parse_frontmatter(f)
+        assert rc.bookend is True
+
+    def test_bookend_false(self, tmp_path):
+        f = tmp_path / "round.md"
+        f.write_text("---\nname: dead-code\nbookend: false\n---\nPrompt.\n")
+        rc = qp.parse_frontmatter(f)
+        assert rc.bookend is False
+
+    def test_bookend_default(self, tmp_path):
+        """bookend defaults to False when not specified."""
+        f = tmp_path / "round.md"
+        f.write_text("---\nname: test\n---\nPrompt.\n")
+        rc = qp.parse_frontmatter(f)
+        assert rc.bookend is False
+
+    def test_bookend_string_true(self, tmp_path):
+        f = tmp_path / "round.md"
+        f.write_text("---\nname: dead-code\nbookend: 'true'\n---\nPrompt.\n")
+        rc = qp.parse_frontmatter(f)
+        assert rc.bookend is True
+
 
 class TestGetRoundPrompt:
     def test_with_frontmatter(self, tmp_path):

@@ -243,7 +243,7 @@ class TestRunStaticAnalysis:
         result = qp.run_static_analysis("security", Path("."))
         assert "### bandit" in result
         assert "### semgrep" in result
-        assert set(called) == {"bandit", "semgrep"}
+        assert set(called) == {"bandit", "semgrep", "ruff-security"}
 
     def test_all_analyzers_empty_output(self, monkeypatch):
         """When all analyzers produce no output, result should be empty."""
@@ -253,3 +253,84 @@ class TestRunStaticAnalysis:
         )
         result = qp.run_static_analysis("security", Path("."))
         assert result == ""
+
+    def test_default_analyzers_include_ruff_and_codegraph(self):
+        """DEFAULT_ANALYZERS should include the new ruff and codegraph entries."""
+        assert "ruff-security" in qp.DEFAULT_ANALYZERS["security"]
+        assert "ruff-dead-code" in qp.DEFAULT_ANALYZERS["dead-code"]
+        assert "codegraph-unused" in qp.DEFAULT_ANALYZERS["dead-code"]
+        assert "ruff-simplify" in qp.DEFAULT_ANALYZERS["simplify"]
+        assert "ruff-refactor" in qp.DEFAULT_ANALYZERS["refactor"]
+
+
+class TestRunAnalyzerVirtualNames:
+    """Tests for _run_analyzer binary detection using args[0], not name."""
+
+    def test_virtual_name_uses_args0_for_which(self, tmp_path, monkeypatch):
+        """Binary lookup should use args[0] ('ruff'), not name ('ruff-dead-code')."""
+        (tmp_path / "pyproject.toml").write_text("")
+        which_calls = []
+
+        def mock_which(name):
+            which_calls.append(name)
+            if name in ("gtimeout", "timeout"):
+                return None
+            if name == "ruff":
+                return "/usr/bin/ruff"
+            return None  # "ruff-dead-code" would not be found
+
+        monkeypatch.setattr(shutil, "which", mock_which)
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **_kw: MagicMock(stdout="found issue", returncode=0),
+        )
+        result = qp._run_analyzer(
+            "ruff-dead-code",
+            ["ruff", "check", "--select", "F401", "."],
+            tmp_path,
+            ["pyproject.toml"],
+        )
+        # Should succeed because args[0]="ruff" is found
+        assert result == "found issue"
+        # First which() call should be for "ruff", not "ruff-dead-code"
+        assert which_calls[0] == "ruff"
+
+    def test_new_analyzer_defs_have_correct_binaries(self):
+        """Each new analyzer entry should exist in analyzer_defs with the right binary."""
+        # Build analyzer_defs the same way run_static_analysis does
+        python_prereqs = [
+            "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+        ]
+        # Call run_static_analysis to exercise the defs; we just need to inspect them.
+        # Instead, import and inspect the function source indirectly:
+        # We verify by calling with overrides and checking the args passed.
+        expected = {
+            "ruff-dead-code": "ruff",
+            "ruff-simplify": "ruff",
+            "ruff-security": "ruff",
+            "ruff-refactor": "ruff",
+            "codegraph-unused": "codegraph",
+        }
+        captured_args = {}
+
+        def mock_analyzer(name, args, _proj, _prereqs=None):
+            captured_args[name] = args
+            return ""
+
+        import quality_pipeline.detection as det
+        orig = det._run_analyzer
+        det._run_analyzer = mock_analyzer
+        try:
+            for analyzer_name in expected:
+                qp.run_static_analysis("any", Path("."), analyzer_name)
+        finally:
+            det._run_analyzer = orig
+
+        for analyzer_name, expected_binary in expected.items():
+            assert analyzer_name in captured_args, (
+                f"{analyzer_name} not found in analyzer_defs"
+            )
+            assert captured_args[analyzer_name][0] == expected_binary, (
+                f"{analyzer_name} binary should be {expected_binary}, "
+                f"got {captured_args[analyzer_name][0]}"
+            )

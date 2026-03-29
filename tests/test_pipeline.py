@@ -848,3 +848,74 @@ class TestRoundResultHasTiming:
         )
         assert result.outcome == qp.RoundOutcome.HARD_FAILED
         assert result.elapsed_seconds >= 0
+
+
+class TestFilterBookendChanges:
+    """Tests for _filter_bookend_changes diff intersection logic."""
+
+    @staticmethod
+    def _make_diff(file_deletions: dict[str, list[str]]) -> str:
+        """Build a synthetic unified diff from {filename: [deleted_lines]}."""
+        lines = []
+        for filename, deleted in file_deletions.items():
+            lines.append(f"--- a/{filename}")
+            lines.append(f"+++ b/{filename}")
+            for d in deleted:
+                lines.append(f"-{d}")
+        return "\n".join(lines)
+
+    def test_subset_is_safe_superset_is_skipped(self):
+        """Baseline deletes A,B,C from file1 and X,Y from file2.
+        Current deletes A,B from file1 (subset=safe) and X,Y,Z from file2 (superset=skipped).
+        """
+        baseline = self._make_diff({
+            "file1.py": ["line_A", "line_B", "line_C"],
+            "file2.py": ["line_X", "line_Y"],
+        })
+        current = self._make_diff({
+            "file1.py": ["line_A", "line_B"],
+            "file2.py": ["line_X", "line_Y", "line_Z"],
+        })
+        safe, skipped = qp._filter_bookend_changes(baseline, current)
+        assert safe == {"file1.py"}
+        assert skipped == {"file2.py"}
+
+    def test_empty_baseline_all_skipped(self):
+        """Empty baseline means no deletions are safe."""
+        current = self._make_diff({
+            "file1.py": ["line_A"],
+            "file2.py": ["line_X"],
+        })
+        safe, skipped = qp._filter_bookend_changes("", current)
+        assert safe == set()
+        assert skipped == {"file1.py", "file2.py"}
+
+    def test_identical_diffs_all_safe(self):
+        """Identical diffs mean all files are safe."""
+        diff = self._make_diff({
+            "file1.py": ["line_A", "line_B"],
+            "file2.py": ["line_X"],
+        })
+        safe, skipped = qp._filter_bookend_changes(diff, diff)
+        assert safe == {"file1.py", "file2.py"}
+        assert skipped == set()
+
+    def test_file_not_in_baseline_is_skipped(self):
+        """Current deletes from a file not in baseline -> skipped."""
+        baseline = self._make_diff({
+            "file1.py": ["line_A"],
+        })
+        current = self._make_diff({
+            "file1.py": ["line_A"],
+            "new_file.py": ["line_X"],
+        })
+        safe, skipped = qp._filter_bookend_changes(baseline, current)
+        assert safe == {"file1.py"}
+        assert skipped == {"new_file.py"}
+
+    def test_empty_current_returns_empty(self):
+        """No current deletions -> both sets empty."""
+        baseline = self._make_diff({"file1.py": ["line_A"]})
+        safe, skipped = qp._filter_bookend_changes(baseline, "")
+        assert safe == set()
+        assert skipped == set()
