@@ -97,7 +97,10 @@ class TestRunTestsWithTee:
 
     def test_failure_returns_nonzero(self, tmp_path):
         output_file = tmp_path / "output.txt"
-        exit_code = qp.run_tests_with_tee("exit 1", output_file)
+        # Use `false` (a real binary) rather than `exit 1` (a shell builtin)
+        # because run_tests_with_tee prepends stdbuf when available, and
+        # stdbuf cannot exec builtins.
+        exit_code = qp.run_tests_with_tee("false", output_file)
         assert exit_code == 1
 
     def test_stderr_merged_into_output(self, tmp_path):
@@ -826,3 +829,229 @@ class TestReviewerExitCodeCheck:
             1, qp.RoundConfig(name="test", review=True), "abc", log_dir, None,
         )
         assert result is None
+
+
+class TestMetaReviewErrorCases:
+    """Additional error path tests for run_meta_review."""
+
+    def test_claude_nonzero_exit_still_returns_output(self, tmp_path, monkeypatch):
+        """Non-zero exit from claude should still return the output file if it exists."""
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "meta-reviewer.md").write_text("Review: CONTEXT_PLACEHOLDER")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        def mock_popen(*args, **_kwargs):
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO('{"overall_assessment": "incomplete"}')
+            proc.stderr = io.StringIO("")
+            proc.returncode = 1
+            proc.wait.return_value = 1
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        monkeypatch.setattr(qp.process, "is_auth_error", lambda _: False)
+        result = qp.run_meta_review(
+            [qp.RoundResult("test", qp.RoundOutcome.PASSED)],
+            "quality/test", log_dir, 100,
+        )
+        # run_meta_review returns the output file regardless of exit code
+        assert result is not None
+        assert result.exists()
+
+    def test_skipped_rounds_excluded_from_summary(self, tmp_path, monkeypatch):
+        """Skipped rounds should not appear in the meta-review prompt."""
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "meta-reviewer.md").write_text("Review: CONTEXT_PLACEHOLDER")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        captured_cmds = []
+
+        def mock_popen(cmd, **_kwargs):
+            captured_cmds.append(cmd)
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO('{"overall_assessment": "ok"}')
+            proc.stderr = io.StringIO("")
+            proc.returncode = 0
+            proc.wait.return_value = 0
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        results = [
+            qp.RoundResult("audit", qp.RoundOutcome.PASSED, elapsed_seconds=60),
+            qp.RoundResult("skipped-round", qp.RoundOutcome.SKIPPED),
+            qp.RoundResult("refactor", qp.RoundOutcome.PASSED, elapsed_seconds=30),
+        ]
+        qp.run_meta_review(results, "quality/test", log_dir, 90)
+        # The prompt is the second element of the cmd list (after "claude", "-p")
+        prompt = captured_cmds[0][2]
+        assert "audit" in prompt
+        assert "refactor" in prompt
+        assert "skipped-round" not in prompt
+
+    def test_malformed_review_json_on_disk(self, tmp_path, monkeypatch):
+        """Malformed review JSON files on disk should be silently skipped."""
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "meta-reviewer.md").write_text("Review: CONTEXT_PLACEHOLDER")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        # Write a malformed review file
+        (log_dir / "review-round-1.json").write_text("not valid json {{{")
+
+        captured_cmds = []
+
+        def mock_popen(cmd, **_kwargs):
+            captured_cmds.append(cmd)
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO('{"overall_assessment": "ok"}')
+            proc.stderr = io.StringIO("")
+            proc.returncode = 0
+            proc.wait.return_value = 0
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        results = [qp.RoundResult("audit", qp.RoundOutcome.PASSED)]
+        result = qp.run_meta_review(results, "quality/test", log_dir, 60)
+        # Should succeed despite malformed review file
+        assert result is not None
+
+    def test_includes_diff_stats_in_prompt(self, tmp_path, monkeypatch):
+        """DiffStats details should be included in the meta-review prompt."""
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "meta-reviewer.md").write_text("Review: CONTEXT_PLACEHOLDER")
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        captured_cmds = []
+
+        def mock_popen(cmd, **_kwargs):
+            captured_cmds.append(cmd)
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO('{}')
+            proc.stderr = io.StringIO("")
+            proc.returncode = 0
+            proc.wait.return_value = 0
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        results = [
+            qp.RoundResult(
+                "audit", qp.RoundOutcome.PASSED,
+                elapsed_seconds=60,
+                diff_stats=qp.DiffStats(
+                    files_changed=3, insertions=42, deletions=18,
+                    stat_summary="3 files, +42/-18",
+                    stat_detail="pipeline.py | 30 +++---\nconfig.py | 12 ++--",
+                ),
+                commit_sha="abc1234",
+            ),
+        ]
+        qp.run_meta_review(results, "quality/test", log_dir, 60)
+        prompt = captured_cmds[0][2]
+        assert "3 files, +42/-18" in prompt
+        assert "pipeline.py" in prompt
+
+
+class TestReviewerDiffTruncation:
+    """Test that reviewer truncates large diffs."""
+
+    def test_large_diff_truncated(self, tmp_path, monkeypatch):
+        """Diffs exceeding REVIEWER_MAX_DIFF_CHARS should be truncated."""
+        huge_diff = "x" * 25_000  # exceeds 20_000 limit
+        monkeypatch.setattr(
+            qp.process, "git",
+            _mock_git_fn(stdout=huge_diff),
+        )
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "reviewer.md").write_text("Review: DIFF_PLACEHOLDER")
+
+        captured_cmds = []
+
+        def mock_popen(cmd, **_kwargs):
+            captured_cmds.append(cmd)
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO('{"verdict": "pass"}')
+            proc.stderr = io.StringIO("")
+            proc.returncode = 0
+            proc.wait.return_value = 0
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        monkeypatch.setattr(qp.process, "is_auth_error", lambda _: False)
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        qp.run_reviewer(
+            1, qp.RoundConfig(name="test", review=True), "abc", log_dir, None,
+        )
+        # The prompt passed to claude should contain the truncation notice
+        prompt = captured_cmds[0][2]
+        assert "truncated" in prompt
+
+    def test_small_diff_not_truncated(self, tmp_path, monkeypatch):
+        """Diffs under the limit should not be truncated."""
+        small_diff = "some changes\n"
+        monkeypatch.setattr(
+            qp.process, "git",
+            _mock_git_fn(stdout=small_diff),
+        )
+        monkeypatch.setattr(qp.process, "TEMPLATE_DIR", tmp_path)
+        (tmp_path / "reviewer.md").write_text("Review: DIFF_PLACEHOLDER")
+
+        captured_cmds = []
+
+        def mock_popen(cmd, **_kwargs):
+            captured_cmds.append(cmd)
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO('{"verdict": "pass"}')
+            proc.stderr = io.StringIO("")
+            proc.returncode = 0
+            proc.wait.return_value = 0
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        monkeypatch.setattr(qp.process, "is_auth_error", lambda _: False)
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        qp.run_reviewer(
+            1, qp.RoundConfig(name="test", review=True), "abc", log_dir, None,
+        )
+        prompt = captured_cmds[0][2]
+        assert "truncated" not in prompt
+
+
+class TestRunClaudeTimeout:
+    """Test run_claude timeout handling."""
+
+    def test_timeout_returns_negative_one(self, tmp_path, monkeypatch):
+        """Timed-out claude invocation should return -1."""
+        log_file = tmp_path / "claude.log"
+
+        class InstantTimer:
+            def __init__(self, _interval, function):
+                self._fn = function
+            def start(self):
+                self._fn()
+            def cancel(self):
+                pass
+
+        monkeypatch.setattr(threading, "Timer", InstantTimer)
+
+        def mock_popen(*args, **kwargs):
+            proc = MagicMock()
+            proc.pid = -1
+            proc.stdout = io.StringIO("")
+            proc.stderr = io.StringIO("")
+            proc.returncode = -9
+            proc.wait.return_value = -9
+            return proc
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        code = qp.run_claude("prompt", "ctx", 5.0, 20, log_file, timeout_minutes=1)
+        assert code == -1

@@ -111,3 +111,91 @@ class TestDetectGpuMoved:
             lambda name: "/usr/bin/rocm-smi" if name == "rocm-smi" else None,
         )
         assert qp.detect_gpu() == "rocm"
+
+
+class TestResourceMonitorInterval:
+    """Test that the monitor thread ticks at least once."""
+
+    def test_monitor_ticks_at_least_once(self, monkeypatch):
+        """With a short interval, the monitor should produce at least one snapshot."""
+        snapshots = []
+
+        def capture_snapshot(gpu_type="none"):
+            result = "CPU: mock | Mem: mock"
+            snapshots.append(result)
+            return result
+
+        monkeypatch.setattr(qp.monitoring, "get_resource_snapshot", capture_snapshot)
+        monitor = qp.ResourceMonitor(
+            interval=0.1, gpu_type="none", start_epoch=time.time(),
+        )
+        monitor.start()
+        time.sleep(0.3)
+        monitor.stop()
+        assert len(snapshots) >= 1
+
+    def test_stop_is_idempotent(self, monkeypatch):
+        """Calling stop() multiple times should not raise."""
+        monkeypatch.setattr(
+            qp.monitoring, "get_resource_snapshot", lambda gpu_type="none": "ok"
+        )
+        monitor = qp.ResourceMonitor(
+            interval=1, gpu_type="none", start_epoch=time.time(),
+        )
+        monitor.start()
+        monitor.stop()
+        monitor.stop()  # should not raise
+
+
+class TestGetGpuInfo:
+    """Test GPU info helpers with edge cases."""
+
+    def test_nvidia_unexpected_output(self, monkeypatch):
+        """nvidia-smi returning garbage should not crash."""
+        def mock_run(cmd, **_kwargs):
+            if cmd[0] == "nvidia-smi":
+                return MagicMock(stdout="unexpected output format\n", returncode=0)
+            return MagicMock(stdout="0", returncode=0)
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        result = qp.get_resource_snapshot("nvidia")
+        # Should not crash, GPU info may or may not appear
+        assert isinstance(result, str)
+
+    def test_nvidia_smi_timeout_in_snapshot(self, monkeypatch):
+        """nvidia-smi timing out during snapshot should be handled."""
+        def mock_run(cmd, **_kwargs):
+            if cmd[0] == "nvidia-smi":
+                raise subprocess.TimeoutExpired("nvidia-smi", 5)
+            return MagicMock(stdout="0", returncode=0)
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        result = qp.get_resource_snapshot("nvidia")
+        assert isinstance(result, str)
+        assert "GPU" not in result
+
+    def test_rocm_smi_with_utilization(self, monkeypatch):
+        """rocm-smi returning utilization should be included."""
+        def mock_run(cmd, **_kwargs):
+            if cmd[0] == "rocm-smi":
+                return MagicMock(
+                    stdout="GPU[0] : GPU use: 75%\n", returncode=0,
+                )
+            return MagicMock(stdout="0", returncode=0)
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        result = qp.get_resource_snapshot("rocm")
+        assert "75%" in result
+
+    def test_rocm_smi_zero_utilization(self, monkeypatch):
+        """rocm-smi returning 0% should be omitted."""
+        def mock_run(cmd, **_kwargs):
+            if cmd[0] == "rocm-smi":
+                return MagicMock(
+                    stdout="GPU[0] : GPU use: 0%\n", returncode=0,
+                )
+            return MagicMock(stdout="0", returncode=0)
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        result = qp.get_resource_snapshot("rocm")
+        assert "GPU" not in result

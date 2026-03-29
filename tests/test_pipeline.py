@@ -919,3 +919,109 @@ class TestFilterBookendChanges:
         safe, skipped = qp._filter_bookend_changes(baseline, "")
         assert safe == set()
         assert skipped == set()
+
+
+class TestRunBookendBaseline:
+    """Tests for _run_bookend_baseline orchestration."""
+
+    @pytest.fixture
+    def round_file(self, tmp_path):
+        f = tmp_path / "08-dead-code.md"
+        f.write_text(
+            "---\nname: dead-code\ngate: hard\nbookend: true\n"
+            "max_budget_usd: 2.0\nmax_turns: 10\nmax_time_minutes: 5\n---\n"
+            "Remove dead code.\n"
+        )
+        return f
+
+    @pytest.fixture
+    def log_dir(self, tmp_path):
+        d = tmp_path / "logs"
+        d.mkdir()
+        return d
+
+    @pytest.fixture
+    def rc(self, round_file):
+        return qp.apply_config_overrides(
+            qp.parse_frontmatter(round_file), qp.PipelineConfig()
+        )
+
+    def _mock_bookend_env(self, monkeypatch, claude_exit=0, diff_text="--- a/f.py\n+++ b/f.py\n-dead"):
+        """Set up mocks for _run_bookend_baseline."""
+        monkeypatch.setattr(
+            qp.pipeline_mod, "run_static_analysis", lambda *a, **_kw: ""
+        )
+        monkeypatch.setattr(
+            qp.pipeline_mod, "run_claude", lambda *a, **_kw: claude_exit
+        )
+        monkeypatch.setattr(
+            qp.pipeline_mod, "git_diff_full", lambda: diff_text
+        )
+        rollback_calls = []
+        monkeypatch.setattr(
+            qp.pipeline_mod, "git_rollback_changes",
+            lambda: rollback_calls.append(1),
+        )
+        return rollback_calls
+
+    def test_success_returns_diff(self, round_file, log_dir, rc, monkeypatch):
+        """Successful baseline should return the captured diff text."""
+        expected_diff = "--- a/f.py\n+++ b/f.py\n-unused_func"
+        rollback_calls = self._mock_bookend_env(
+            monkeypatch, claude_exit=0, diff_text=expected_diff
+        )
+        result = qp._run_bookend_baseline(
+            round_file, 1, 1, "pytest", qp.PipelineConfig(), log_dir, rc,
+        )
+        assert result == expected_diff
+        assert len(rollback_calls) == 1  # always rolls back
+
+    def test_claude_failure_returns_empty(self, round_file, log_dir, rc, monkeypatch):
+        """When Claude exits non-zero, baseline returns empty string."""
+        rollback_calls = self._mock_bookend_env(monkeypatch, claude_exit=1)
+        result = qp._run_bookend_baseline(
+            round_file, 1, 1, "pytest", qp.PipelineConfig(), log_dir, rc,
+        )
+        assert result == ""
+        assert len(rollback_calls) == 1  # still rolls back on failure
+
+    def test_no_diff_returns_empty(self, round_file, log_dir, rc, monkeypatch):
+        """When Claude succeeds but makes no changes, return empty string."""
+        self._mock_bookend_env(monkeypatch, claude_exit=0, diff_text="")
+        result = qp._run_bookend_baseline(
+            round_file, 1, 1, "pytest", qp.PipelineConfig(), log_dir, rc,
+        )
+        assert result == ""
+
+    def test_static_analysis_appended_to_prompt(self, round_file, log_dir, rc, monkeypatch):
+        """When static analysis produces output, it should be passed to run_claude."""
+        monkeypatch.setattr(
+            qp.pipeline_mod, "run_static_analysis",
+            lambda *a, **_kw: "vulture: unused function foo (90% confidence)",
+        )
+        captured_prompts = []
+        def mock_claude(prompt, *a, **_kw):
+            captured_prompts.append(prompt)
+            return 0
+        monkeypatch.setattr(qp.pipeline_mod, "run_claude", mock_claude)
+        monkeypatch.setattr(qp.pipeline_mod, "git_diff_full", lambda: "diff")
+        monkeypatch.setattr(qp.pipeline_mod, "git_rollback_changes", lambda: None)
+
+        qp._run_bookend_baseline(
+            round_file, 1, 1, "pytest", qp.PipelineConfig(), log_dir, rc,
+        )
+        assert len(captured_prompts) == 1
+        assert "vulture" in captured_prompts[0]
+        assert "Static Analysis" in captured_prompts[0]
+
+    def test_always_rolls_back_even_on_success(self, round_file, log_dir, rc, monkeypatch):
+        """Baseline must always rollback — it's a dry run."""
+        rollback_calls = self._mock_bookend_env(
+            monkeypatch, claude_exit=0, diff_text="some diff"
+        )
+        qp._run_bookend_baseline(
+            round_file, 1, 1, "pytest", qp.PipelineConfig(), log_dir, rc,
+        )
+        assert len(rollback_calls) == 1
+
+

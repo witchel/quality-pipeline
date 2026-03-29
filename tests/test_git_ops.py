@@ -412,3 +412,187 @@ class TestGitDiffStats:
         monkeypatch.setattr(qp.git_ops, "git", mock_git)
         ds = qp.git_diff_stats("abc", "def")
         assert ds.stat_summary == "1 file, +8/-3"
+
+
+class TestGitRollbackChanges:
+    """Tests for git_rollback_changes (full reset)."""
+
+    def test_calls_checkout_and_clean(self, monkeypatch):
+        """Should call git checkout -- . and git clean -fd."""
+        calls = []
+
+        def mock_git(*args, **kwargs):
+            calls.append(args)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+        qp.git_rollback_changes()
+        assert ("checkout", "--", ".") in calls
+        assert ("clean", "-fd") in calls
+
+    def test_does_not_raise_on_failure(self, monkeypatch):
+        """Should use check=False so failures don't raise."""
+        calls = []
+
+        def mock_git(*args, **kwargs):
+            calls.append((args, kwargs))
+            return MagicMock(returncode=1)
+
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+        # Should not raise
+        qp.git_rollback_changes()
+        # Verify check=False was passed
+        for _args, kwargs in calls:
+            assert kwargs.get("check") is False
+
+
+class TestGitDiffFull:
+    """Tests for git_diff_full — combines staged + unstaged diffs."""
+
+    def test_combines_unstaged_and_staged(self, monkeypatch):
+        call_idx = [0]
+
+        def mock_git(*args, **kwargs):
+            call_idx[0] += 1
+            r = MagicMock()
+            r.returncode = 0
+            if "--cached" in args:
+                r.stdout = "staged diff\n"
+            else:
+                r.stdout = "unstaged diff\n"
+            return r
+
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+        result = qp.git_diff_full()
+        assert "unstaged diff" in result
+        assert "staged diff" in result
+
+    def test_empty_when_no_changes(self, monkeypatch):
+        def mock_git(*args, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            return r
+
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+        assert qp.git_diff_full() == ""
+
+
+class TestSetupWorktreeFailures:
+    """Tests for setup_worktree error handling."""
+
+    @staticmethod
+    def _setup_worktree_mocks(monkeypatch, calls, wt_path, branch_exists=False):
+        def mock_git(*args, **kwargs):
+            calls.append(args)
+            r = MagicMock()
+            if "show-ref" in args:
+                r.returncode = 0 if branch_exists else 1
+            else:
+                r.returncode = 0
+            if "worktree" in args and "add" in args:
+                wt_path.mkdir(exist_ok=True)
+            return r
+
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+
+        def mock_mkdtemp(prefix=""):
+            wt_path.mkdir(exist_ok=True)
+            return str(wt_path)
+
+        monkeypatch.setattr("tempfile.mkdtemp", mock_mkdtemp)
+
+    def test_skips_nonexistent_symlink_source(self, tmp_path, monkeypatch):
+        """Dirs that don't exist in the original should not be symlinked."""
+        orig_dir = tmp_path / "orig"
+        orig_dir.mkdir()
+        monkeypatch.chdir(orig_dir)
+
+        calls = []
+        wt_path = tmp_path / "worktree-dir"
+        self._setup_worktree_mocks(monkeypatch, calls, wt_path)
+
+        qp.setup_worktree("quality/test", ["nonexistent_dir"])
+        # No symlink created because source doesn't exist
+        assert not (wt_path / "nonexistent_dir").exists()
+
+    def test_skips_symlink_if_dest_already_exists(self, tmp_path, monkeypatch):
+        """If the symlink target already exists in the worktree, don't overwrite."""
+        orig_dir = tmp_path / "orig"
+        orig_dir.mkdir()
+        (orig_dir / "node_modules").mkdir()
+        monkeypatch.chdir(orig_dir)
+
+        calls = []
+        wt_path = tmp_path / "worktree-dir"
+
+        def mock_git(*args, **kwargs):
+            calls.append(args)
+            r = MagicMock()
+            if "show-ref" in args:
+                r.returncode = 1
+            else:
+                r.returncode = 0
+            if "worktree" in args and "add" in args:
+                wt_path.mkdir(exist_ok=True)
+                # Simulate git creating node_modules in the worktree
+                (wt_path / "node_modules").mkdir(exist_ok=True)
+            return r
+
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+
+        def mock_mkdtemp(prefix=""):
+            wt_path.mkdir(exist_ok=True)
+            return str(wt_path)
+
+        monkeypatch.setattr("tempfile.mkdtemp", mock_mkdtemp)
+
+        qp.setup_worktree("quality/test", ["node_modules"])
+        # The existing dir should not be replaced with a symlink
+        assert not (wt_path / "node_modules").is_symlink()
+
+    def test_returns_original_and_worktree_dirs(self, tmp_path, monkeypatch):
+        """Should return (worktree_dir, original_dir)."""
+        orig_dir = tmp_path / "orig"
+        orig_dir.mkdir()
+        monkeypatch.chdir(orig_dir)
+
+        calls = []
+        wt_path = tmp_path / "worktree-dir"
+        self._setup_worktree_mocks(monkeypatch, calls, wt_path)
+
+        wt_dir, original_dir = qp.setup_worktree("quality/test", [])
+        assert wt_dir == wt_path
+        assert original_dir == orig_dir
+
+
+class TestGitCommitGpgFallback:
+    """Test git_commit GPG sign fallback more thoroughly."""
+
+    def test_both_attempts_fail_raises(self, monkeypatch):
+        """When both --no-gpg-sign and plain commit fail, should raise."""
+        def mock_git(*args, **kwargs):
+            r = MagicMock()
+            r.returncode = 128
+            r.stderr = "fatal: something went wrong"
+            return r
+
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+        with pytest.raises(subprocess.CalledProcessError):
+            qp.git_commit("test commit")
+
+    def test_first_attempt_succeeds(self, monkeypatch):
+        """When --no-gpg-sign works, should not retry."""
+        calls = []
+
+        def mock_git(*args, **kwargs):
+            calls.append(args)
+            r = MagicMock()
+            r.returncode = 0
+            return r
+
+        monkeypatch.setattr(qp.git_ops, "git", mock_git)
+        qp.git_commit("test commit")
+        # Should have only been called once
+        assert len(calls) == 1
+        assert "--no-gpg-sign" in calls[0]
