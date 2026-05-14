@@ -245,6 +245,18 @@ class TestRunStaticAnalysis:
         assert "### semgrep" in result
         assert set(called) == {"bandit", "semgrep", "ruff-security"}
 
+    def test_maintainability_default_analyzers(self, monkeypatch):
+        """Maintainability should use both refactor and simplify ruff rules."""
+        called = []
+        def mock_analyzer(name, _args, _proj, _prereqs=None):
+            called.append(name)
+            return f"output-{name}"
+        monkeypatch.setattr(qp.detection, "_run_analyzer", mock_analyzer)
+        result = qp.run_static_analysis("maintainability", Path("."))
+        assert "### ruff-refactor" in result
+        assert "### ruff-simplify" in result
+        assert set(called) == {"ruff-refactor", "ruff-simplify"}
+
     def test_all_analyzers_empty_output(self, monkeypatch):
         """When all analyzers produce no output, result should be empty."""
         monkeypatch.setattr(
@@ -261,6 +273,9 @@ class TestRunStaticAnalysis:
         assert "codegraph-unused" in qp.DEFAULT_ANALYZERS["dead-code"]
         assert "ruff-simplify" in qp.DEFAULT_ANALYZERS["simplify"]
         assert "ruff-refactor" in qp.DEFAULT_ANALYZERS["refactor"]
+        assert qp.DEFAULT_ANALYZERS["maintainability"] == (
+            "ruff-refactor ruff-simplify"
+        )
 
 
 class TestRunAnalyzerVirtualNames:
@@ -297,10 +312,6 @@ class TestRunAnalyzerVirtualNames:
 
     def test_new_analyzer_defs_have_correct_binaries(self):
         """Each new analyzer entry should exist in analyzer_defs with the right binary."""
-        # Build analyzer_defs the same way run_static_analysis does
-        python_prereqs = [
-            "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
-        ]
         # Call run_static_analysis to exercise the defs; we just need to inspect them.
         # Instead, import and inspect the function source indirectly:
         # We verify by calling with overrides and checking the args passed.

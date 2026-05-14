@@ -121,3 +121,22 @@ The hardest part was migrating monkeypatch targets: `from .git_ops import git` i
 "git", mock)` no longer affects the code. Every test patch was remapped to the
 consuming module (e.g., `qp.pipeline_mod.git`, `qp.process.TEMPLATE_DIR`,
 `qp.git_ops.git`). All 171 tests pass with the new structure.
+
+---
+
+## 2026-05-14 — Add maintainability as a first-class round
+
+The original round set improved tests, correctness, security, typing, dead code,
+dependencies, and simplification, but maintainability was only implicit in the
+generic refactor/simplify passes. That left a recurring gap: AI cleanup could
+make local code look better while preserving duplicate implementations, leaky
+interfaces, brittle tests coupled to internals, or unclear module ownership.
+
+Added a conservative `maintainability` round after `audit-tests` and before
+`refactor`. It is soft-gated and reviewer-backed, and it focuses on high-confidence
+interface hygiene: consolidating clearly duplicated behavior, tightening internal
+helper signatures, keeping public behavior stable, and moving tests toward
+observable behavior rather than private implementation details. The reviewer and
+meta-review prompts now explicitly look for maintainability/interface regressions,
+so later rounds are judged not only for correctness but also for whether they
+make the code harder to change safely.

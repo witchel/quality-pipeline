@@ -781,7 +781,7 @@ def pipeline(
             bookend_baselines[rc.name] = baseline_diff
             C.log(f"  Captured {len(baseline_diff)} bytes of baseline diff")
         else:
-            C.log(f"  No dead code found in baseline")
+            C.log("  No dead code found in baseline")
 
     # --- Run rounds ---
     pipeline_start = time.time()

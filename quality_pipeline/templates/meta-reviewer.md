@@ -16,7 +16,11 @@ Evaluate the pipeline run against these criteria:
 
 4. **Time efficiency** — Rounds that took disproportionate time relative to their value. A round using 40% of pipeline time for minor cosmetic changes is a problem.
 
-5. **Recommendations** — Actionable suggestions for improving round prompts, reordering rounds, merging redundant rounds, or adjusting budgets.
+5. **Architecture and maintainability drift** — Rounds that introduced or failed
+   to address duplicate implementations, leaky interfaces, broad public surface
+   area, unclear module ownership, or brittle tests coupled to internals.
+
+6. **Recommendations** — Actionable suggestions for improving round prompts, reordering rounds, merging redundant rounds, or adjusting budgets.
 
 ## Output Format
 

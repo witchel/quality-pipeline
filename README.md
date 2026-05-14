@@ -1,6 +1,6 @@
 # Quality Pipeline
 
-A multi-round automated code quality tool for Claude Code. Runs sequential quality rounds (testing, refactoring, concurrency, fault tolerance, error handling, security, type safety, dead code elimination, dependency hygiene, simplification) with test verification and clean git commits.
+A multi-round automated code quality tool for Claude Code. Runs sequential quality rounds (testing, maintainability, refactoring, concurrency, fault tolerance, error handling, security, type safety, dead code elimination, dependency hygiene, simplification) with test verification and clean git commits.
 
 ## Installation
 
@@ -24,7 +24,7 @@ quality-pipeline
 quality-pipeline --dry-run
 
 # Cherry-pick rounds
-quality-pipeline --rounds "audit-tests dead-code simplify"
+quality-pipeline --rounds "audit-tests maintainability dead-code simplify"
 
 # Resume from round 3
 quality-pipeline --start-from 3
@@ -66,9 +66,10 @@ When invoked from within a Claude Code session, the pipeline automatically unset
 | Round | Prefix | Turns | Time | Gate | Retries | Review | Description |
 |-------|--------|-------|------|------|---------|--------|-------------|
 | `audit-tests` | `test:` | 40 | 20m | hard | 2 | | Audit test quality and fill coverage gaps with substantial, independent tests |
+| `maintainability` | `refactor:` | 40 | 20m | soft | 1 | yes | Fix duplicate implementations, leaky interfaces, module-boundary drift, and brittle tests |
 | `refactor` | `refactor:` | 40 | 20m | soft | 1 | | Improve naming, structure, and clarity |
-| `concurrency` | `fix:` | 30 | 15m | hard | 0 | yes | Fix races, lost updates, and find parallelization opportunities |
-| `fault-tolerance` | `fix:` | 30 | 15m | hard | 0 | yes | Fix non-atomic writes, lost updates, missing fsync, and idempotency bugs |
+| `concurrency` | `fix:` | 30 | 25m | hard | 0 | yes | Fix races, lost updates, and find parallelization opportunities |
+| `fault-tolerance` | `fix:` | 30 | 25m | hard | 0 | yes | Fix non-atomic writes, lost updates, missing fsync, and idempotency bugs |
 | `error-handling` | `fix:` | 30 | 15m | hard | 1 | | Fix swallowed errors, missing error paths, and inconsistent patterns |
 | `security` | `fix:` | 40 | 20m | hard | 0 | yes | Fix hardcoded secrets, injection vectors, and insecure defaults |
 | `type-safety` | `refactor:` | 30 | 15m | soft | 1 | | Add missing type annotations and tighten overly broad types |
@@ -108,15 +109,18 @@ When tests fail after a round, the pipeline can retry by re-invoking Claude with
 
 Rounds can be augmented with static analysis results. The pipeline runs configured analyzers before Claude and injects their output into the prompt. Default mappings:
 
+- `maintainability` → ruff-refactor, ruff-simplify
+- `refactor` → ruff-refactor
 - `security` → bandit, semgrep
 - `type-safety` → mypy, pyright, tsc
-- `dead-code` → vulture
+- `dead-code` → vulture, ruff-dead-code, codegraph-unused
+- `simplify` → ruff-simplify
 
 Override per-round with the `analyzers` frontmatter field or via `overrides` in pipeline.yaml.
 
 ## Behavior Contracts
 
-Correctness-critical rounds (concurrency, fault-tolerance, error-handling, security) include Behavior Contract sections that specify what MUST change and what MUST NOT change. These constrain Claude's changes and give the reviewer something concrete to check against.
+Correctness-critical rounds (concurrency, fault-tolerance, error-handling, security) and the maintainability round include Behavior Contract sections that specify what MUST change and what MUST NOT change. These constrain Claude's changes and give the reviewer something concrete to check against.
 
 ## Reviewer Pass
 
@@ -128,7 +132,7 @@ Drop a `.claude/pipeline.yaml` in your project:
 
 ```yaml
 test_command: "pytest tests/"
-rounds: [audit-tests, refactor, concurrency, fault-tolerance, error-handling, security, type-safety, dead-code, dependency-hygiene, simplify]
+rounds: [audit-tests, maintainability, refactor, concurrency, fault-tolerance, error-handling, security, type-safety, dead-code, dependency-hygiene, simplify]
 branch_prefix: "quality/"
 max_budget_usd: 20.00
 max_time_minutes: 20
@@ -217,7 +221,7 @@ uv run quality-pipeline --worktree --dry-run
 uv run quality-pipeline --worktree
 
 # Cherry-pick rounds
-uv run quality-pipeline --worktree --rounds "audit-tests simplify"
+uv run quality-pipeline --worktree --rounds "audit-tests maintainability simplify"
 ```
 
 Test auto-detection works because the repo now has a `pyproject.toml` with pytest configured.

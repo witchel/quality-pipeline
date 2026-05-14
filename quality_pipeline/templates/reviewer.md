@@ -14,6 +14,13 @@ Evaluate the diff against these criteria:
 
 5. **Subtle regressions**: Look for changes that pass tests but may cause problems in production — changed default values, altered error messages that downstream systems may parse, modified public API signatures, or removed functionality that tests don't cover.
 
+6. **Maintainability/interface regressions**: Did the changes introduce or
+   preserve avoidable maintainability debt? Look for duplicate implementations
+   of the same behavior, new public surface area that exposes internals,
+   widened helper interfaces, tests coupled to private implementation details,
+   and module-boundary leaks where one component starts doing another
+   component's job.
+
 ## Diff to Review
 
 ```diff
@@ -29,7 +36,7 @@ Respond with a JSON object (and nothing else) in this exact format:
   "verdict": "pass|warn|critical",
   "issues": [
     {
-      "criterion": "correctness|contract|scope|tests|regression",
+      "criterion": "correctness|contract|scope|tests|regression|maintainability",
       "severity": "info|warn|critical",
       "file": "path/to/file",
       "description": "What the issue is and why it matters"

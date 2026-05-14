@@ -171,7 +171,7 @@ class ResourceMonitor:
     """Daemon thread that logs resource usage periodically."""
 
     def __init__(
-        self, interval: int, gpu_type: str, start_epoch: float,
+        self, interval: float, gpu_type: str, start_epoch: float,
     ) -> None:
         self._stop = threading.Event()
         self._interval = interval

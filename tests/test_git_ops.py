@@ -400,7 +400,6 @@ class TestGitDiffStats:
 
     def test_single_file(self, monkeypatch):
         """Single file change should not pluralize."""
-        calls = []
         def mock_git(*args, **kwargs):
             r = MagicMock()
             r.returncode = 0

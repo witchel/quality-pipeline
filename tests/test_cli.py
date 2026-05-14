@@ -112,14 +112,14 @@ class TestCliValidation:
 
     def test_start_from_zero_rejected(self):
         runner = CliRunner()
-        with patch("quality_pipeline.__main__.pipeline") as mock_pl:
+        with patch("quality_pipeline.__main__.pipeline"):
             result = runner.invoke(cli, ["--start-from", "0"])
         assert result.exit_code != 0
         assert "positive integer" in result.output.lower() or "must be" in result.output.lower()
 
     def test_start_from_negative_rejected(self):
         runner = CliRunner()
-        with patch("quality_pipeline.__main__.pipeline") as mock_pl:
+        with patch("quality_pipeline.__main__.pipeline"):
             result = runner.invoke(cli, ["--start-from", "-1"])
         assert result.exit_code != 0
 

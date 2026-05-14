@@ -10,6 +10,7 @@ import signal
 import subprocess
 import threading
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import quality_pipeline as qp
@@ -159,18 +160,23 @@ class TestRunTestsTimeout:
 class TestRunClaude:
     @staticmethod
     def _mock_popen(returncode=0):
-        def factory(*args, **kwargs):
-            proc = MagicMock()
-            proc.pid = -1  # invalid PID so os.killpg won't target real processes
-            proc.stdout = io.StringIO("")
-            proc.stderr = io.StringIO("")
-            proc.returncode = returncode
-            proc.wait.return_value = returncode
-            proc.kill.return_value = None
-            factory.last_cmd = args[0] if args else kwargs.get("args")
-            return proc
-        factory.last_cmd = None
-        return factory
+        class PopenFactory:
+            def __init__(self) -> None:
+                self.last_cmd: list[str] | None = None
+
+            def __call__(self, *args: object, **kwargs: object) -> MagicMock:
+                proc = MagicMock()
+                proc.pid = -1  # invalid PID so os.killpg won't target real processes
+                proc.stdout = io.StringIO("")
+                proc.stderr = io.StringIO("")
+                proc.returncode = returncode
+                proc.wait.return_value = returncode
+                proc.kill.return_value = None
+                cmd = args[0] if args else kwargs.get("args")
+                self.last_cmd = cast(list[str], cmd) if isinstance(cmd, list) else None
+                return proc
+
+        return PopenFactory()
 
     def test_returns_exit_code(self, tmp_path, monkeypatch):
         log_file = tmp_path / "claude.log"
@@ -189,6 +195,7 @@ class TestRunClaude:
         mock = self._mock_popen(0)
         monkeypatch.setattr(subprocess, "Popen", mock)
         qp.run_claude("prompt", "ctx", 3.50, 10, log_file)
+        assert mock.last_cmd is not None
         assert "3.50" in mock.last_cmd
         assert "10" in mock.last_cmd
 
@@ -319,6 +326,15 @@ class TestRunReviewer:
         log_dir.mkdir()
         qp.run_reviewer(1, self._make_rc(), "abc", log_dir, None)
         assert not list(log_dir.glob("review-*.json"))
+
+    def test_builtin_template_mentions_maintainability_criterion(self):
+        template = (qp.TEMPLATE_DIR / "reviewer.md").read_text()
+        assert "Maintainability/interface regressions" in template
+        assert "duplicate implementations" in template
+        assert (
+            "correctness|contract|scope|tests|regression|maintainability"
+            in template
+        )
 
     def _run_reviewer_with_verdict(self, tmp_path, monkeypatch, verdict_json):
         """Helper: run reviewer and write a specific verdict to the output file."""

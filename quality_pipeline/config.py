@@ -30,6 +30,7 @@ ENV_FILES = [".env", ".env.local", ".env.test"]
 BRANCH_PREFIX_DEFAULT = "quality"
 
 DEFAULT_ANALYZERS: dict[str, str] = {
+    "maintainability": "ruff-refactor ruff-simplify",
     "security": "bandit semgrep ruff-security",
     "type-safety": "mypy pyright tsc",
     "dead-code": "vulture ruff-dead-code codegraph-unused",
@@ -109,7 +110,7 @@ class RoundResult:
 # ---------------------------------------------------------------------------
 
 
-def _parse_review_bool(val: bool | str | None) -> bool | None:
+def _parse_review_bool(val: object) -> bool | None:
     """Convert a review field value to bool | None."""
     if isinstance(val, bool):
         return val

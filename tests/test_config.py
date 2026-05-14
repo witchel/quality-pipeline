@@ -494,6 +494,7 @@ class TestRoundOutcome:
             reviewer_verdict="pass", change_summary="Fixed race condition",
         )
         assert r.elapsed_seconds == 134
+        assert r.diff_stats is not None
         assert r.diff_stats.files_changed == 3
         assert r.commit_sha == "abc1234"
         assert r.change_summary == "Fixed race condition"
@@ -517,6 +518,29 @@ class TestDiscoverRounds:
     def test_missing_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(qp.config, "ROUNDS_DIR", tmp_path / "nonexistent")
         assert qp.discover_rounds() == []
+
+
+class TestBuiltinMaintainabilityRound:
+    def test_frontmatter_matches_expected_defaults(self):
+        round_file = qp.resolve_round_file("maintainability")
+        assert round_file is not None
+        assert round_file.name == "02-maintainability.md"
+
+        rc = qp.parse_frontmatter(round_file)
+        assert rc.name == "maintainability"
+        assert rc.commit_message_prefix == "refactor: "
+        assert rc.max_budget_usd == 5.00
+        assert rc.max_turns == 40
+        assert rc.max_time_minutes == 20
+        assert rc.gate == "soft"
+        assert rc.max_retries == 1
+        assert rc.review is True
+        assert rc.review_gate == "soft"
+        assert rc.analyzers == "ruff-refactor ruff-simplify"
+
+    def test_runs_between_audit_tests_and_refactor(self):
+        names = [qp.parse_frontmatter(path).name for path in qp.discover_rounds()]
+        assert names[:3] == ["audit-tests", "maintainability", "refactor"]
 
 
 class TestResolveRoundFile:

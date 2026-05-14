@@ -412,7 +412,7 @@ def run_reviewer(
                 cmd, review_output, REVIEWER_TIMEOUT_MINUTES,
             )
             if timed_out:
-                C.warn(f"Reviewer timed out — skipping review")
+                C.warn("Reviewer timed out — skipping review")
                 return None
             if exit_code == 0 or not is_auth_error(review_output):
                 break
