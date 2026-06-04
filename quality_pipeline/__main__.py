@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import click
 
 from .pipeline import pipeline
@@ -46,6 +48,15 @@ def cli(
     Orchestrates sequential `claude -p` invocations, each with a focused
     objective, test verification, and a clean git commit.
     """
+    # Windows consoles default to a legacy code page (cp1252); the pipeline
+    # prints non-ASCII status glyphs (✓ ✗ ━ ─ ← ⏱ •). Force UTF-8 so they
+    # don't crash with UnicodeEncodeError. Entry point only, never at import.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
     if start_from < 1:
         raise click.BadParameter(
             f"must be a positive integer (got: {start_from})", param_hint="--start-from"

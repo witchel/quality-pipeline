@@ -54,17 +54,17 @@ def _get_memory_darwin() -> str:
         mem_total = int(
             subprocess.run(
                 ["sysctl", "-n", "hw.memsize"],
-                capture_output=True, text=True, check=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", check=True, timeout=5,
             ).stdout.strip()
         ) // (1024 * 1024)
         page_size = int(
             subprocess.run(
                 ["sysctl", "-n", "hw.pagesize"],
-                capture_output=True, text=True, check=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", check=True, timeout=5,
             ).stdout.strip()
         )
         vm_out = subprocess.run(
-            ["vm_stat"], capture_output=True, text=True, check=True, timeout=5,
+            ["vm_stat"], capture_output=True, text=True, encoding="utf-8", check=True, timeout=5,
         ).stdout
         pages = {"active": 0, "wired": 0, "compressed": 0}
         for line in vm_out.splitlines():
@@ -89,7 +89,7 @@ def _get_memory_linux() -> str:
     if not meminfo.exists():
         return "?"
     try:
-        data = meminfo.read_text()
+        data = meminfo.read_text(encoding="utf-8")
         total = avail = 0
         for line in data.splitlines():
             if line.startswith("MemTotal:"):
@@ -125,7 +125,7 @@ def _get_gpu_nvidia() -> str:
                 "--query-gpu=index,utilization.gpu,memory.used,memory.total",
                 "--format=csv,noheader,nounits",
             ],
-            capture_output=True, text=True, check=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", check=True, timeout=5,
         ).stdout.strip()
         parts = []
         any_active = False
@@ -148,7 +148,7 @@ def _get_gpu_rocm() -> str:
     try:
         out = subprocess.run(
             ["rocm-smi", "--showgpuuse"],
-            capture_output=True, text=True, check=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", check=True, timeout=5,
         ).stdout
         m = re.search(r"(\d+)\s*%", out)
         if m and int(m.group(1)) > 0:

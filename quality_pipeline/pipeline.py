@@ -65,7 +65,7 @@ _CHANGES_SUMMARY_PREFIX = "CHANGES_SUMMARY:"
 def _extract_change_summary(log_file: Path) -> str:
     """Extract Claude's self-reported change summary from its log output."""
     try:
-        raw = log_file.read_text()
+        raw = log_file.read_text(encoding="utf-8")
     except OSError:
         return ""
     raw = unwrap_claude_json(raw)
@@ -461,7 +461,7 @@ def _execute_round(
         C.warn(f"Retry {attempt}/{rc.max_retries}: re-invoking Claude to fix test failures...")
 
         # Build retry prompt with last 100 lines
-        test_lines = test_output_file.read_text().splitlines()
+        test_lines = test_output_file.read_text(encoding="utf-8").splitlines()
         test_tail = "\n".join(test_lines[-_TEST_FAILURE_TAIL_LINES:])
         retry_prompt = (
             "The tests are failing after your changes. Here is the test output:\n\n"

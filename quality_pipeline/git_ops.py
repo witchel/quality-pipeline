@@ -19,6 +19,7 @@ def git(*args: str, capture: bool = True, check: bool = True) -> subprocess.Comp
         ["git", *args],
         capture_output=capture,
         text=True,
+        encoding="utf-8",
         check=check,
     )
 
@@ -162,7 +163,7 @@ def _is_lock_stale(lock_path: Path) -> bool:
     """
     pid_file = _lock_pid_path(lock_path)
     try:
-        old_pid = int(pid_file.read_text().strip())
+        old_pid = int(pid_file.read_text(encoding="utf-8").strip())
     except (FileNotFoundError, ValueError, OSError):
         return False  # No PID file → can't determine, assume live
     try:

@@ -96,14 +96,14 @@ def run_tests_with_tee(
 
     proc = subprocess.Popen(
         cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, start_new_session=True, env=env,
+        text=True, encoding="utf-8", bufsize=1, start_new_session=True, env=env,
     )
     timer: threading.Timer | None = None
     if timeout_seconds > 0:
         timer = threading.Timer(timeout_seconds, _kill_on_timeout)
         timer.start()
     try:
-        with output_file.open("w") as fout:
+        with output_file.open("w", encoding="utf-8") as fout:
             if proc.stdout is not None:
                 try:
                     for line in proc.stdout:
@@ -146,7 +146,7 @@ def _claude_env() -> dict[str, str]:
 def is_auth_error(log_file: Path) -> bool:
     """Check whether a claude -p JSON log indicates an authentication failure."""
     try:
-        raw = log_file.read_text()
+        raw = log_file.read_text(encoding="utf-8")
     except OSError:
         return False
     if not raw.strip():
@@ -218,7 +218,7 @@ def _run_claude_process(
 
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1, env=env, start_new_session=True,
+        text=True, encoding="utf-8", bufsize=1, env=env, start_new_session=True,
     )
     timer: threading.Timer | None = None
     if timeout_secs is not None:
@@ -226,7 +226,7 @@ def _run_claude_process(
         timer.start()
     stderr_thread: threading.Thread | None = None
     try:
-        with output_file.open("w") as fout:
+        with output_file.open("w", encoding="utf-8") as fout:
             def _tee_stderr() -> None:
                 assert proc.stderr is not None
                 try:
@@ -382,7 +382,7 @@ def run_reviewer(
         C.warn(f"Reviewer template not found: {template_file} — skipping")
         return None
 
-    review_prompt = template_file.read_text().replace("DIFF_PLACEHOLDER", diff_content)
+    review_prompt = template_file.read_text(encoding="utf-8").replace("DIFF_PLACEHOLDER", diff_content)
     review_output = log_dir / f"review-round-{round_num}.json"
 
     cmd = [
@@ -426,7 +426,7 @@ def run_reviewer(
         C.warn(f"Reviewer exited with code {exit_code} — skipping verdict parse")
         return None
 
-    verdict = _parse_verdict(review_output.read_text())
+    verdict = _parse_verdict(review_output.read_text(encoding="utf-8"))
 
     if verdict == "pass":
         C.ok(f"Reviewer: {C.GREEN}PASS{C.NC}")
@@ -497,7 +497,7 @@ def run_meta_review(
     review_sections: list[str] = []
     for review_file in sorted(log_dir.glob("review-round-*.json")):
         try:
-            raw = review_file.read_text()
+            raw = review_file.read_text(encoding="utf-8")
             outer = json.loads(raw)
             if isinstance(outer, dict) and "result" in outer:
                 raw = outer["result"]
@@ -513,7 +513,7 @@ def run_meta_review(
         context_parts.append("\n## Per-round reviewer output\n" + "\n".join(review_sections))
 
     full_context = "\n".join(context_parts)
-    prompt = template_file.read_text().replace("CONTEXT_PLACEHOLDER", full_context)
+    prompt = template_file.read_text(encoding="utf-8").replace("CONTEXT_PLACEHOLDER", full_context)
 
     meta_output = log_dir / "meta-review.json"
     cmd = [
@@ -541,7 +541,7 @@ def run_meta_review(
 def _print_meta_review_findings(output_file: Path) -> None:
     """Print a summary of meta-review findings."""
     try:
-        raw = output_file.read_text()
+        raw = output_file.read_text(encoding="utf-8")
     except OSError:
         return
     # Unwrap claude JSON wrapper

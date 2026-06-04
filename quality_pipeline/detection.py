@@ -23,7 +23,7 @@ def detect_test_command(project_dir: Path) -> str | None:
     # 1. CLAUDE.md
     claude_md = project_dir / "CLAUDE.md"
     if claude_md.exists():
-        text = claude_md.read_text(errors="replace")
+        text = claude_md.read_text(encoding="utf-8", errors="replace")
         # Explicit "test command:" or "run tests:" line
         m = re.search(
             r"^\s*(?:test command|run tests):?\s+(.+)",
@@ -44,7 +44,7 @@ def detect_test_command(project_dir: Path) -> str | None:
     makefile = project_dir / "Makefile"
     if makefile.exists():
         try:
-            if re.search(r"^test\s*:", makefile.read_text(), re.MULTILINE):
+            if re.search(r"^test\s*:", makefile.read_text(encoding="utf-8"), re.MULTILINE):
                 return "make test"
         except OSError:
             pass
@@ -53,7 +53,7 @@ def detect_test_command(project_dir: Path) -> str | None:
     pkg_json = project_dir / "package.json"
     if pkg_json.exists():
         try:
-            data = json.loads(pkg_json.read_text())
+            data = json.loads(pkg_json.read_text(encoding="utf-8"))
             test_script = data.get("scripts", {}).get("test", "")
             if test_script and "no test specified" not in test_script:
                 # Pick the right package manager
@@ -74,7 +74,7 @@ def detect_test_command(project_dir: Path) -> str | None:
     pyproject = project_dir / "pyproject.toml"
     if pyproject.exists():
         try:
-            content = pyproject.read_text()
+            content = pyproject.read_text(encoding="utf-8")
             if re.search(r"\[tool\.pytest", content) or "pytest" in content:
                 return "uv run pytest" if has_uv_lock else "pytest"
         except OSError:
@@ -83,7 +83,7 @@ def detect_test_command(project_dir: Path) -> str | None:
     setup_cfg = project_dir / "setup.cfg"
     if setup_cfg.exists():
         try:
-            if "[tool:pytest]" in setup_cfg.read_text():
+            if "[tool:pytest]" in setup_cfg.read_text(encoding="utf-8"):
                 return "uv run pytest" if has_uv_lock else "pytest"
         except OSError:
             pass
@@ -129,7 +129,7 @@ def _run_analyzer(name: str, args: list[str], project_dir: Path,
     try:
         result = subprocess.run(
             [*timeout_cmd, *args],
-            capture_output=True, text=True, check=False, cwd=project_dir,
+            capture_output=True, text=True, encoding="utf-8", check=False, cwd=project_dir,
             timeout=sub_timeout,
         )
         return result.stdout.strip()

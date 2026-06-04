@@ -77,7 +77,7 @@ def atomic_write_text(path: Path, content: str) -> None:
         dir=parent, prefix=f".{path.name}.", suffix=".tmp",
     )
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())

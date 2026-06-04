@@ -121,7 +121,7 @@ def _parse_review_bool(val: object) -> bool | None:
 
 def parse_frontmatter(path: Path) -> RoundConfig:
     """Parse YAML frontmatter from a round file into RoundConfig."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     # Extract content between first and second ---
     parts = text.split("---", 2)
     if len(parts) < 3:
@@ -157,7 +157,7 @@ def parse_frontmatter(path: Path) -> RoundConfig:
 
 def get_round_prompt(path: Path) -> str:
     """Extract prompt body (everything after the closing --- of frontmatter)."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     parts = text.split("---", 2)
     if len(parts) >= 3:
         return parts[2].lstrip("\n")
@@ -167,7 +167,7 @@ def get_round_prompt(path: Path) -> str:
 def load_pipeline_config(path: Path) -> PipelineConfig:
     """Load pipeline.yaml configuration."""
     try:
-        data = yaml.safe_load(path.read_text()) or {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (yaml.YAMLError, OSError) as e:
         C.warn(f"Failed to parse config: {e}")
         return PipelineConfig()
